@@ -16,6 +16,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use ui::{prelude::*, Button, ButtonLike, Color, IconName, Indicator, Tooltip};
 use util::ResultExt;
 
+use crate::LanguageModelCompletionEvent;
 use crate::{
     settings::AllLanguageModelSettings, LanguageModel, LanguageModelId, LanguageModelName,
     LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
@@ -405,7 +406,7 @@ impl LanguageModel for OllamaLanguageModel {
         &self,
         request: LanguageModelRequest,
         cx: &AsyncAppContext,
-    ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>> {
+    ) -> BoxFuture<'static, Result<BoxStream<'static, Result<LanguageModelCompletionEvent>>>> {
         let request = self.to_ollama_request(request);
 
         let http_client = self.http_client.clone();
@@ -438,7 +439,13 @@ impl LanguageModel for OllamaLanguageModel {
             Ok(stream)
         });
 
-        async move { Ok(future.await?.boxed()) }.boxed()
+        async move {
+            Ok(future
+                .await?
+                .map(|result| result.map(LanguageModelCompletionEvent::Text))
+                .boxed())
+        }
+        .boxed()
     }
 
     fn use_any_tool(

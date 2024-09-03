@@ -25,8 +25,9 @@ use gpui::{
 
 use language::{AnchorRangeExt, Bias, Buffer, LanguageRegistry, OffsetRangeExt, Point, ToOffset};
 use language_model::{
-    LanguageModel, LanguageModelCacheConfiguration, LanguageModelImage, LanguageModelRegistry,
-    LanguageModelRequest, LanguageModelRequestMessage, MessageContent, Role,
+    LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionEvent,
+    LanguageModelImage, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
+    MessageContent, Role,
 };
 use open_ai::Model as OpenAiModel;
 use paths::{context_images_dir, contexts_dir};
@@ -472,7 +473,7 @@ pub enum XmlTagKind {
     Step,
     Edit,
     Path,
-    Symbol,
+    Search,
     Within,
     Operation,
     Description,
@@ -489,6 +490,7 @@ pub struct Context {
     edits_since_last_parse: language::Subscription,
     finished_slash_commands: HashSet<SlashCommandId>,
     slash_command_output_sections: Vec<SlashCommandOutputSection<language::Anchor>>,
+    pending_tool_uses_by_id: HashMap<String, PendingToolUse>,
     message_anchors: Vec<MessageAnchor>,
     images: HashMap<u64, (Arc<RenderImage>, Shared<Task<Option<LanguageModelImage>>>)>,
     image_anchors: Vec<ImageAnchor>,
@@ -590,6 +592,7 @@ impl Context {
             messages_metadata: Default::default(),
             pending_slash_commands: Vec::new(),
             finished_slash_commands: HashSet::default(),
+            pending_tool_uses_by_id: HashMap::default(),
             slash_command_output_sections: Vec::new(),
             edits_since_last_parse: edits_since_last_slash_command_parse,
             summary: None,
@@ -1001,6 +1004,14 @@ impl Context {
 
     pub fn slash_command_output_sections(&self) -> &[SlashCommandOutputSection<language::Anchor>] {
         &self.slash_command_output_sections
+    }
+
+    pub fn pending_tool_uses(&self) -> Vec<&PendingToolUse> {
+        self.pending_tool_uses_by_id.values().collect()
+    }
+
+    pub fn get_tool_use_by_id(&self, id: &String) -> Option<&PendingToolUse> {
+        self.pending_tool_uses_by_id.get(id)
     }
 
     fn set_language(&mut self, cx: &mut ModelContext<Self>) {
@@ -1518,7 +1529,7 @@ impl Context {
 
                     if tag.kind == XmlTagKind::Edit && tag.is_open_tag {
                         let mut path = None;
-                        let mut symbol = None;
+                        let mut search = None;
                         let mut operation = None;
                         let mut description = None;
 
@@ -1527,7 +1538,7 @@ impl Context {
                                 edits.push(WorkflowStepEdit::new(
                                     path,
                                     operation,
-                                    symbol,
+                                    search,
                                     description,
                                 ));
                                 break;
@@ -1536,7 +1547,7 @@ impl Context {
                             if tag.is_open_tag
                                 && [
                                     XmlTagKind::Path,
-                                    XmlTagKind::Symbol,
+                                    XmlTagKind::Search,
                                     XmlTagKind::Operation,
                                     XmlTagKind::Description,
                                 ]
@@ -1555,8 +1566,8 @@ impl Context {
                                         match kind {
                                             XmlTagKind::Path => path = Some(content),
                                             XmlTagKind::Operation => operation = Some(content),
-                                            XmlTagKind::Symbol => {
-                                                symbol = Some(content).filter(|s| !s.is_empty())
+                                            XmlTagKind::Search => {
+                                                search = Some(content).filter(|s| !s.is_empty())
                                             }
                                             XmlTagKind::Description => {
                                                 description =
@@ -1950,13 +1961,13 @@ impl Context {
                 let mut response_latency = None;
                 let stream_completion = async {
                     let request_start = Instant::now();
-                    let mut chunks = stream.await?;
+                    let mut events = stream.await?;
 
-                    while let Some(chunk) = chunks.next().await {
+                    while let Some(event) = events.next().await {
                         if response_latency.is_none() {
                             response_latency = Some(request_start.elapsed());
                         }
-                        let chunk = chunk?;
+                        let event = event?;
 
                         this.update(&mut cx, |this, cx| {
                             let message_ix = this
@@ -1970,11 +1981,57 @@ impl Context {
                                     .map_or(buffer.len(), |message| {
                                         message.start.to_offset(buffer).saturating_sub(1)
                                     });
-                                buffer.edit(
-                                    [(message_old_end_offset..message_old_end_offset, chunk)],
-                                    None,
-                                    cx,
-                                );
+
+                                match event {
+                                    LanguageModelCompletionEvent::Text(chunk) => {
+                                        buffer.edit(
+                                            [(
+                                                message_old_end_offset..message_old_end_offset,
+                                                chunk,
+                                            )],
+                                            None,
+                                            cx,
+                                        );
+                                    }
+                                    LanguageModelCompletionEvent::ToolUse(tool_use) => {
+                                        const NEWLINE: char = '\n';
+
+                                        let mut text = String::new();
+                                        text.push(NEWLINE);
+                                        text.push_str(
+                                            &serde_json::to_string_pretty(&tool_use)
+                                                .expect("failed to serialize tool use to JSON"),
+                                        );
+                                        text.push(NEWLINE);
+                                        let text_len = text.len();
+
+                                        buffer.edit(
+                                            [(
+                                                message_old_end_offset..message_old_end_offset,
+                                                text,
+                                            )],
+                                            None,
+                                            cx,
+                                        );
+
+                                        let start_ix = message_old_end_offset + NEWLINE.len_utf8();
+                                        let end_ix =
+                                            message_old_end_offset + text_len - NEWLINE.len_utf8();
+                                        let source_range = buffer.anchor_after(start_ix)
+                                            ..buffer.anchor_after(end_ix);
+
+                                        this.pending_tool_uses_by_id.insert(
+                                            tool_use.id.clone(),
+                                            PendingToolUse {
+                                                id: tool_use.id,
+                                                name: tool_use.name,
+                                                input: tool_use.input,
+                                                status: PendingToolUseStatus::Idle,
+                                                source_range,
+                                            },
+                                        );
+                                    }
+                                }
                             });
 
                             cx.emit(ContextEvent::StreamedCompletion);
@@ -2406,7 +2463,7 @@ impl Context {
 
             self.pending_summary = cx.spawn(|this, mut cx| {
                 async move {
-                    let stream = model.stream_completion(request, &cx);
+                    let stream = model.stream_completion_text(request, &cx);
                     let mut messages = stream.await?;
 
                     let mut replaced = !replace_old;
@@ -2726,6 +2783,22 @@ pub struct PendingSlashCommand {
 
 #[derive(Debug, Clone)]
 pub enum PendingSlashCommandStatus {
+    Idle,
+    Running { _task: Shared<Task<()>> },
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    pub status: PendingToolUseStatus,
+    pub source_range: Range<language::Anchor>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PendingToolUseStatus {
     Idle,
     Running { _task: Shared<Task<()>> },
     Error(String),

@@ -243,7 +243,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "collections",
  "futures 0.3.30",
  "http_client",
  "isahc",
@@ -14213,7 +14212,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.152.0"
+version = "0.153.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
@@ -14501,14 +14500,14 @@ dependencies = [
 
 [[package]]
 name = "zed_svelte"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "zed_terraform"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

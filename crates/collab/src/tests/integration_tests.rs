@@ -2328,11 +2328,11 @@ async fn test_propagate_saves_and_fs_changes(
         .unwrap();
 
     buffer_b.read_with(cx_b, |buffer, _| {
-        assert_eq!(&*buffer.language().unwrap().name(), "Rust");
+        assert_eq!(buffer.language().unwrap().name(), "Rust".into());
     });
 
     buffer_c.read_with(cx_c, |buffer, _| {
-        assert_eq!(&*buffer.language().unwrap().name(), "Rust");
+        assert_eq!(buffer.language().unwrap().name(), "Rust".into());
     });
     buffer_b.update(cx_b, |buf, cx| buf.edit([(0..0, "i-am-b, ")], None, cx));
     buffer_c.update(cx_c, |buf, cx| buf.edit([(0..0, "i-am-c, ")], None, cx));
@@ -2432,17 +2432,17 @@ async fn test_propagate_saves_and_fs_changes(
 
     buffer_a.read_with(cx_a, |buffer, _| {
         assert_eq!(buffer.file().unwrap().path().to_str(), Some("file1.js"));
-        assert_eq!(&*buffer.language().unwrap().name(), "JavaScript");
+        assert_eq!(buffer.language().unwrap().name(), "JavaScript".into());
     });
 
     buffer_b.read_with(cx_b, |buffer, _| {
         assert_eq!(buffer.file().unwrap().path().to_str(), Some("file1.js"));
-        assert_eq!(&*buffer.language().unwrap().name(), "JavaScript");
+        assert_eq!(buffer.language().unwrap().name(), "JavaScript".into());
     });
 
     buffer_c.read_with(cx_c, |buffer, _| {
         assert_eq!(buffer.file().unwrap().path().to_str(), Some("file1.js"));
-        assert_eq!(&*buffer.language().unwrap().name(), "JavaScript");
+        assert_eq!(buffer.language().unwrap().name(), "JavaScript".into());
     });
 
     let new_buffer_a = project_a
@@ -3324,7 +3324,7 @@ async fn test_local_settings(
         let store = cx.global::<SettingsStore>();
         assert_eq!(
             store
-                .local_settings(worktree_b.entity_id().as_u64() as _)
+                .local_settings(worktree_b.read(cx).id())
                 .collect::<Vec<_>>(),
             &[
                 (Path::new("").into(), r#"{"tab_size":2}"#.to_string()),
@@ -3343,7 +3343,7 @@ async fn test_local_settings(
         let store = cx.global::<SettingsStore>();
         assert_eq!(
             store
-                .local_settings(worktree_b.entity_id().as_u64() as _)
+                .local_settings(worktree_b.read(cx).id())
                 .collect::<Vec<_>>(),
             &[
                 (Path::new("").into(), r#"{}"#.to_string()),
@@ -3372,7 +3372,7 @@ async fn test_local_settings(
         let store = cx.global::<SettingsStore>();
         assert_eq!(
             store
-                .local_settings(worktree_b.entity_id().as_u64() as _)
+                .local_settings(worktree_b.read(cx).id())
                 .collect::<Vec<_>>(),
             &[
                 (Path::new("a").into(), r#"{"tab_size":8}"#.to_string()),
@@ -3404,7 +3404,7 @@ async fn test_local_settings(
         let store = cx.global::<SettingsStore>();
         assert_eq!(
             store
-                .local_settings(worktree_b.entity_id().as_u64() as _)
+                .local_settings(worktree_b.read(cx).id())
                 .collect::<Vec<_>>(),
             &[(Path::new("a").into(), r#"{"hard_tabs":true}"#.to_string()),]
         )

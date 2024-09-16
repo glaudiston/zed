@@ -3,6 +3,7 @@ use crate::{
         ClosePosition, Item, ItemHandle, ItemSettings, PreviewTabsSettings, TabContentParams,
         WeakItemHandle,
     },
+    move_item,
     notifications::NotifyResultExt,
     toolbar::Toolbar,
     workspace_settings::{AutosaveSetting, TabBarSettings, WorkspaceSettings},
@@ -149,6 +150,7 @@ actions!(
         GoBack,
         GoForward,
         JoinIntoNext,
+        JoinAll,
         ReopenClosedItem,
         SplitLeft,
         SplitUp,
@@ -156,6 +158,8 @@ actions!(
         SplitDown,
         SplitHorizontal,
         SplitVertical,
+        SwapItemLeft,
+        SwapItemRight,
         TogglePreviewTab,
         TogglePinTab,
     ]
@@ -188,6 +192,7 @@ pub enum Event {
         item_id: EntityId,
     },
     Split(SplitDirection),
+    JoinAll,
     JoinIntoNext,
     ChangeItemTitle,
     Focus,
@@ -220,6 +225,7 @@ impl fmt::Debug for Event {
                 .debug_struct("Split")
                 .field("direction", direction)
                 .finish(),
+            Event::JoinAll => f.write_str("JoinAll"),
             Event::JoinIntoNext => f.write_str("JoinIntoNext"),
             Event::ChangeItemTitle => f.write_str("ChangeItemTitle"),
             Event::Focus => f.write_str("Focus"),
@@ -679,6 +685,10 @@ impl Pane {
         cx.emit(Event::JoinIntoNext);
     }
 
+    fn join_all(&mut self, cx: &mut ViewContext<Self>) {
+        cx.emit(Event::JoinAll);
+    }
+
     fn history_updated(&mut self, cx: &mut ViewContext<Self>) {
         self.toolbar.update(cx, |_, cx| cx.notify());
     }
@@ -713,6 +723,14 @@ impl Pane {
         if PreviewTabsSettings::get_global(cx).enabled {
             self.preview_item_id = item_id;
         }
+    }
+
+    pub(crate) fn set_pinned_count(&mut self, count: usize) {
+        self.pinned_tab_count = count;
+    }
+
+    pub(crate) fn pinned_count(&self) -> usize {
+        self.pinned_tab_count
     }
 
     pub fn handle_item_edit(&mut self, item_id: EntityId, cx: &AppContext) {
@@ -1036,6 +1054,26 @@ impl Pane {
             index = 0;
         }
         self.activate_item(index, activate_pane, activate_pane, cx);
+    }
+
+    pub fn swap_item_left(&mut self, cx: &mut ViewContext<Self>) {
+        let index = self.active_item_index;
+        if index == 0 {
+            return;
+        }
+
+        self.items.swap(index, index - 1);
+        self.activate_item(index - 1, true, true, cx);
+    }
+
+    pub fn swap_item_right(&mut self, cx: &mut ViewContext<Self>) {
+        let index = self.active_item_index;
+        if index + 1 == self.items.len() {
+            return;
+        }
+
+        self.items.swap(index, index + 1);
+        self.activate_item(index + 1, true, true, cx);
     }
 
     pub fn close_active_item(
@@ -1364,6 +1402,9 @@ impl Pane {
         self.activation_history
             .retain(|entry| entry.entity_id != self.items[item_index].item_id());
 
+        if self.is_tab_pinned(item_index) {
+            self.pinned_tab_count -= 1;
+        }
         if item_index == self.active_item_index {
             let index_to_activate = self
                 .activation_history
@@ -1746,9 +1787,7 @@ impl Pane {
 
             self.workspace
                 .update(cx, |_, cx| {
-                    cx.defer(move |this, cx| {
-                        this.move_item(pane.clone(), pane, id, destination_index, cx)
-                    });
+                    cx.defer(move |_, cx| move_item(&pane, &pane, id, destination_index, cx));
                 })
                 .ok()?;
 
@@ -1766,9 +1805,7 @@ impl Pane {
 
             self.workspace
                 .update(cx, |_, cx| {
-                    cx.defer(move |this, cx| {
-                        this.move_item(pane.clone(), pane, id, destination_index, cx)
-                    });
+                    cx.defer(move |_, cx| move_item(&pane, &pane, id, destination_index, cx));
                 })
                 .ok()?;
 
@@ -1789,6 +1826,7 @@ impl Pane {
         ix: usize,
         item: &dyn ItemHandle,
         detail: usize,
+        focus_handle: &FocusHandle,
         cx: &mut ViewContext<'_, Pane>,
     ) -> impl IntoElement {
         let project_path = item.project_path(cx);
@@ -1899,7 +1937,11 @@ impl Pane {
             })
             .start_slot::<Indicator>(indicator)
             .map(|this| {
+                let end_slot_action: &'static dyn Action;
+                let end_slot_tooltip_text: &'static str;
                 let end_slot = if is_pinned {
+                    end_slot_action = &TogglePinTab;
+                    end_slot_tooltip_text = "Unpin Tab";
                     IconButton::new("unpin tab", IconName::Pin)
                         .shape(IconButtonShape::Square)
                         .icon_color(Color::Muted)
@@ -1908,8 +1950,9 @@ impl Pane {
                         .on_click(cx.listener(move |pane, _, cx| {
                             pane.unpin_tab_at(ix, cx);
                         }))
-                        .tooltip(|cx| Tooltip::text("Unpin Tab", cx))
                 } else {
+                    end_slot_action = &CloseActiveItem { save_intent: None };
+                    end_slot_tooltip_text = "Close Tab";
                     IconButton::new("close tab", IconName::Close)
                         .visible_on_hover("")
                         .shape(IconButtonShape::Square)
@@ -1920,7 +1963,22 @@ impl Pane {
                             pane.close_item_by_id(item_id, SaveIntent::Close, cx)
                                 .detach_and_log_err(cx);
                         }))
-                };
+                }
+                .map(|this| {
+                    if is_active {
+                        let focus_handle = focus_handle.clone();
+                        this.tooltip(move |cx| {
+                            Tooltip::for_action_in(
+                                end_slot_tooltip_text,
+                                end_slot_action,
+                                &focus_handle,
+                                cx,
+                            )
+                        })
+                    } else {
+                        this.tooltip(move |cx| Tooltip::text(end_slot_tooltip_text, cx))
+                    }
+                });
                 this.end_slot(end_slot)
             })
             .child(
@@ -2121,7 +2179,7 @@ impl Pane {
             .iter()
             .enumerate()
             .zip(tab_details(&self.items, cx))
-            .map(|((ix, item), detail)| self.render_tab(ix, &**item, detail, cx))
+            .map(|((ix, item), detail)| self.render_tab(ix, &**item, detail, &focus_handle, cx))
             .collect::<Vec<_>>();
 
         let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
@@ -2317,7 +2375,7 @@ impl Pane {
                             }
                         })
                     }
-                    workspace.move_item(from_pane.clone(), to_pane.clone(), item_id, ix, cx);
+                    move_item(&from_pane, &to_pane, item_id, ix, cx);
                 });
             })
             .log_err();
@@ -2524,6 +2582,7 @@ impl Render for Pane {
             .on_action(cx.listener(|pane, _: &GoBack, cx| pane.navigate_backward(cx)))
             .on_action(cx.listener(|pane, _: &GoForward, cx| pane.navigate_forward(cx)))
             .on_action(cx.listener(|pane, _: &JoinIntoNext, cx| pane.join_into_next(cx)))
+            .on_action(cx.listener(|pane, _: &JoinAll, cx| pane.join_all(cx)))
             .on_action(cx.listener(Pane::toggle_zoom))
             .on_action(cx.listener(|pane: &mut Pane, action: &ActivateItem, cx| {
                 pane.activate_item(action.0, true, true, cx);
@@ -2537,6 +2596,8 @@ impl Render for Pane {
             .on_action(cx.listener(|pane: &mut Pane, _: &ActivateNextItem, cx| {
                 pane.activate_next_item(true, cx);
             }))
+            .on_action(cx.listener(|pane, _: &SwapItemLeft, cx| pane.swap_item_left(cx)))
+            .on_action(cx.listener(|pane, _: &SwapItemRight, cx| pane.swap_item_right(cx)))
             .on_action(cx.listener(|pane, action, cx| {
                 pane.toggle_pin_tab(action, cx);
             }))

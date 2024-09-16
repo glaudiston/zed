@@ -41,11 +41,11 @@ pub struct SshSocket {
 
 pub struct SshSession {
     next_message_id: AtomicU32,
-    response_channels: ResponseChannels,
+    response_channels: ResponseChannels, // Lock
     outgoing_tx: mpsc::UnboundedSender<Envelope>,
     spawn_process_tx: mpsc::UnboundedSender<SpawnRequest>,
     client_socket: Option<SshSocket>,
-    state: Mutex<ProtoMessageHandlerSet>,
+    state: Mutex<ProtoMessageHandlerSet>, // Lock
 }
 
 struct SshClientState {
@@ -156,7 +156,7 @@ impl SshSession {
         run_cmd(socket.ssh_command(&remote_binary_path).arg("version")).await?;
 
         let mut remote_server_child = socket
-            .ssh_command(&format!(
+            .ssh_command(format!(
                 "RUST_LOG={} {:?} run",
                 std::env::var("RUST_LOG").unwrap_or_default(),
                 remote_binary_path,
@@ -392,9 +392,9 @@ impl SshSession {
     ) -> impl 'static + Future<Output = Result<proto::Envelope>> {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.response_channels
-            .lock()
-            .insert(MessageId(envelope.id), tx);
+        let mut response_channels_lock = self.response_channels.lock();
+        response_channels_lock.insert(MessageId(envelope.id), tx);
+        drop(response_channels_lock);
         self.outgoing_tx.unbounded_send(envelope).ok();
         async move { Ok(rx.await.context("connection lost")?.0) }
     }
@@ -661,7 +661,7 @@ impl SshClientState {
                     .unwrap_or_default(),
             )
             .arg(src_path)
-            .arg(&format!(
+            .arg(format!(
                 "{}:{}",
                 self.socket.connection_options.scp_url(),
                 dest_path.display()

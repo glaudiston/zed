@@ -49,7 +49,7 @@ use parking_lot::{Mutex, RwLock};
 use postage::watch;
 use rand::prelude::*;
 
-use rpc::proto::AnyProtoClient;
+use rpc::AnyProtoClient;
 use serde::Serialize;
 use settings::{Settings, SettingsLocation, SettingsStore};
 use sha2::{Digest, Sha256};
@@ -501,15 +501,15 @@ impl LspStore {
     fn on_buffer_event(
         &mut self,
         buffer: Model<Buffer>,
-        event: &language::Event,
+        event: &language::BufferEvent,
         cx: &mut ModelContext<Self>,
     ) {
         match event {
-            language::Event::Edited { .. } => {
+            language::BufferEvent::Edited { .. } => {
                 self.on_buffer_edited(buffer, cx);
             }
 
-            language::Event::Saved => {
+            language::BufferEvent::Saved => {
                 self.on_buffer_saved(buffer, cx);
             }
 
@@ -2305,8 +2305,7 @@ impl LspStore {
                                 .read(cx)
                                 .worktree_for_id(*worktree_id, cx)?;
                             let state = this.as_local()?.language_servers.get(server_id)?;
-                            let delegate =
-                                ProjectLspAdapterDelegate::for_local(this, &worktree, cx);
+                            let delegate = LocalLspAdapterDelegate::for_local(this, &worktree, cx);
                             match state {
                                 LanguageServerState::Starting(_) => None,
                                 LanguageServerState::Running {
@@ -2930,6 +2929,7 @@ impl LspStore {
             })
             .map(|(_, server)| server.server_id())
             .collect::<Vec<_>>();
+
         let mut response_results = server_ids
             .into_iter()
             .map(|server_id| {
@@ -3313,6 +3313,12 @@ impl LspStore {
         }
 
         cx.emit(LspStoreEvent::DiskBasedDiagnosticsStarted { language_server_id });
+        cx.emit(LspStoreEvent::LanguageServerUpdate {
+            language_server_id,
+            message: proto::update_language_server::Variant::DiskBasedDiagnosticsUpdating(
+                Default::default(),
+            ),
+        })
     }
 
     pub fn disk_based_diagnostics_finished(
@@ -3327,6 +3333,12 @@ impl LspStore {
         }
 
         cx.emit(LspStoreEvent::DiskBasedDiagnosticsFinished { language_server_id });
+        cx.emit(LspStoreEvent::LanguageServerUpdate {
+            language_server_id,
+            message: proto::update_language_server::Variant::DiskBasedDiagnosticsUpdated(
+                Default::default(),
+            ),
+        })
     }
 
     // After saving a buffer using a language server that doesn't provide a disk-based progress token,
@@ -4355,7 +4367,7 @@ impl LspStore {
         let response = this
             .update(&mut cx, |this, cx| {
                 let worktree = this.worktree_for_id(worktree_id, cx)?;
-                let delegate = ProjectLspAdapterDelegate::for_local(this, &worktree, cx);
+                let delegate = LocalLspAdapterDelegate::for_local(this, &worktree, cx);
                 anyhow::Ok(
                     cx.spawn(|_, _| async move { delegate.which(command.as_os_str()).await }),
                 )
@@ -4376,7 +4388,7 @@ impl LspStore {
         let response = this
             .update(&mut cx, |this, cx| {
                 let worktree = this.worktree_for_id(worktree_id, cx)?;
-                let delegate = ProjectLspAdapterDelegate::for_local(this, &worktree, cx);
+                let delegate = LocalLspAdapterDelegate::for_local(this, &worktree, cx);
                 anyhow::Ok(cx.spawn(|_, _| async move { delegate.shell_env().await }))
             })??
             .await;
@@ -4384,6 +4396,52 @@ impl LspStore {
         Ok(proto::ShellEnvResponse {
             env: response.into_iter().collect(),
         })
+    }
+    pub async fn handle_try_exec(
+        this: Model<Self>,
+        envelope: TypedEnvelope<proto::TryExec>,
+        mut cx: AsyncAppContext,
+    ) -> Result<proto::Ack> {
+        let worktree_id = WorktreeId::from_proto(envelope.payload.worktree_id);
+        let binary = envelope
+            .payload
+            .binary
+            .ok_or_else(|| anyhow!("missing binary"))?;
+        let binary = LanguageServerBinary {
+            path: PathBuf::from(binary.path),
+            env: None,
+            arguments: binary.arguments.into_iter().map(Into::into).collect(),
+        };
+        this.update(&mut cx, |this, cx| {
+            let worktree = this.worktree_for_id(worktree_id, cx)?;
+            let delegate = LocalLspAdapterDelegate::for_local(this, &worktree, cx);
+            anyhow::Ok(cx.spawn(|_, _| async move { delegate.try_exec(binary).await }))
+        })??
+        .await?;
+
+        Ok(proto::Ack {})
+    }
+
+    pub async fn handle_read_text_file(
+        this: Model<Self>,
+        envelope: TypedEnvelope<proto::ReadTextFile>,
+        mut cx: AsyncAppContext,
+    ) -> Result<proto::ReadTextFileResponse> {
+        let path = envelope
+            .payload
+            .path
+            .ok_or_else(|| anyhow!("missing path"))?;
+        let worktree_id = WorktreeId::from_proto(path.worktree_id);
+        let path = PathBuf::from(path.path);
+        let response = this
+            .update(&mut cx, |this, cx| {
+                let worktree = this.worktree_for_id(worktree_id, cx)?;
+                let delegate = LocalLspAdapterDelegate::for_local(this, &worktree, cx);
+                anyhow::Ok(cx.spawn(|_, _| async move { delegate.read_text_file(path).await }))
+            })??
+            .await?;
+
+        Ok(proto::ReadTextFileResponse { text: response })
     }
 
     async fn handle_apply_additional_edits_for_completion(
@@ -4522,9 +4580,12 @@ impl LspStore {
     ) {
         let ssh = self.as_ssh().unwrap();
 
-        let delegate =
-            ProjectLspAdapterDelegate::for_ssh(self, worktree, ssh.upstream_client.clone(), cx)
-                as Arc<dyn LspAdapterDelegate>;
+        let delegate = Arc::new(SshLspAdapterDelegate {
+            lsp_store: cx.handle().downgrade(),
+            worktree: worktree.read(cx).snapshot(),
+            upstream_client: ssh.upstream_client.clone(),
+            language_registry: self.languages.clone(),
+        }) as Arc<dyn LspAdapterDelegate>;
 
         // TODO: We should use `adapter` here instead of reaching through the `CachedLspAdapter`.
         let lsp_adapter = adapter.adapter.clone();
@@ -4629,14 +4690,13 @@ impl LspStore {
             return;
         }
 
+        let local = self.as_local().unwrap();
+
         let stderr_capture = Arc::new(Mutex::new(Some(String::new())));
-        let lsp_adapter_delegate = ProjectLspAdapterDelegate::for_local(self, worktree_handle, cx);
-        let cli_environment = self
-            .as_local()
-            .unwrap()
-            .environment
-            .read(cx)
-            .get_cli_environment();
+        let lsp_adapter_delegate = LocalLspAdapterDelegate::for_local(self, worktree_handle, cx);
+        let project_environment = local.environment.update(cx, |environment, cx| {
+            environment.get_environment(Some(worktree_id), Some(worktree_path.clone()), cx)
+        });
 
         let pending_server = match self.languages.create_pending_language_server(
             stderr_capture.clone(),
@@ -4644,7 +4704,7 @@ impl LspStore {
             adapter.clone(),
             Arc::clone(&worktree_path),
             lsp_adapter_delegate.clone(),
-            cli_environment,
+            project_environment,
             cx,
         ) {
             Some(pending_server) => pending_server,
@@ -6371,21 +6431,16 @@ impl LspStore {
                                 let buffer_id = buffer_to_edit.read(cx).remote_id();
                                 let version = if let Some(buffer_version) = op.text_document.version
                                 {
-                                    this.buffer_snapshots
-                                        .get(&buffer_id)
-                                        .and_then(|server_to_snapshots| {
-                                            let all_snapshots = server_to_snapshots
-                                                .get(&language_server.server_id())?;
-                                            all_snapshots
-                                                .binary_search_by_key(&buffer_version, |snapshot| {
-                                                    snapshot.version
-                                                })
-                                                .ok()
-                                                .and_then(|index| all_snapshots.get(index))
-                                        })
-                                        .map(|lsp_snapshot| lsp_snapshot.snapshot.version())
+                                    this.buffer_snapshot_for_lsp_version(
+                                        &buffer_to_edit,
+                                        language_server.server_id(),
+                                        Some(buffer_version),
+                                        cx,
+                                    )
+                                    .ok()
+                                    .map(|snapshot| snapshot.version)
                                 } else {
-                                    Some(buffer_to_edit.read(cx).saved_version())
+                                    Some(buffer_to_edit.read(cx).saved_version().clone())
                                 };
 
                                 let most_recent_edit = version.and_then(|version| {
@@ -6931,18 +6986,32 @@ impl LspAdapter for SshLspAdapter {
         None
     }
 }
+pub fn language_server_settings<'a, 'b: 'a>(
+    delegate: &'a dyn LspAdapterDelegate,
+    language: &str,
+    cx: &'b AppContext,
+) -> Option<&'a LspSettings> {
+    ProjectSettings::get(
+        Some(SettingsLocation {
+            worktree_id: delegate.worktree_id(),
+            path: delegate.worktree_root_path(),
+        }),
+        cx,
+    )
+    .lsp
+    .get(language)
+}
 
-pub struct ProjectLspAdapterDelegate {
+pub struct LocalLspAdapterDelegate {
     lsp_store: WeakModel<LspStore>,
     worktree: worktree::Snapshot,
-    fs: Option<Arc<dyn Fs>>,
+    fs: Arc<dyn Fs>,
     http_client: Arc<dyn HttpClient>,
     language_registry: Arc<LanguageRegistry>,
     load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
-    upstream_client: Option<AnyProtoClient>,
 }
 
-impl ProjectLspAdapterDelegate {
+impl LocalLspAdapterDelegate {
     fn for_local(
         lsp_store: &LspStore,
         worktree: &Model<Worktree>,
@@ -6950,45 +7019,37 @@ impl ProjectLspAdapterDelegate {
     ) -> Arc<Self> {
         let local = lsp_store
             .as_local()
-            .expect("ProjectLspAdapterDelegate cannot be constructed on a remote");
+            .expect("LocalLspAdapterDelegate cannot be constructed on a remote");
 
         let http_client = local
             .http_client
             .clone()
             .unwrap_or_else(|| Arc::new(BlockedHttpClient));
 
-        Self::new(
-            lsp_store,
-            worktree,
-            http_client,
-            Some(local.fs.clone()),
-            None,
-            cx,
-        )
+        Self::new(lsp_store, worktree, http_client, local.fs.clone(), cx)
     }
 
-    fn for_ssh(
-        lsp_store: &LspStore,
-        worktree: &Model<Worktree>,
-        upstream_client: AnyProtoClient,
-        cx: &mut ModelContext<LspStore>,
-    ) -> Arc<Self> {
-        Self::new(
-            lsp_store,
-            worktree,
-            Arc::new(BlockedHttpClient),
-            None,
-            Some(upstream_client),
-            cx,
-        )
-    }
+    // fn for_ssh(
+    //     lsp_store: &LspStore,
+    //     worktree: &Model<Worktree>,
+    //     upstream_client: AnyProtoClient,
+    //     cx: &mut ModelContext<LspStore>,
+    // ) -> Arc<Self> {
+    //     Self::new(
+    //         lsp_store,
+    //         worktree,
+    //         Arc::new(BlockedHttpClient),
+    //         None,
+    //         Some(upstream_client),
+    //         cx,
+    //     )
+    // }
 
     pub fn new(
         lsp_store: &LspStore,
         worktree: &Model<Worktree>,
         http_client: Arc<dyn HttpClient>,
-        fs: Option<Arc<dyn Fs>>,
-        upstream_client: Option<AnyProtoClient>,
+        fs: Arc<dyn Fs>,
         cx: &mut ModelContext<LspStore>,
     ) -> Arc<Self> {
         let worktree_id = worktree.read(cx).id();
@@ -7008,10 +7069,88 @@ impl ProjectLspAdapterDelegate {
             worktree: worktree.read(cx).snapshot(),
             fs,
             http_client,
-            upstream_client,
             language_registry: lsp_store.languages.clone(),
             load_shell_env_task,
         })
+    }
+}
+
+#[async_trait]
+impl LspAdapterDelegate for LocalLspAdapterDelegate {
+    fn show_notification(&self, message: &str, cx: &mut AppContext) {
+        self.lsp_store
+            .update(cx, |_, cx| {
+                cx.emit(LspStoreEvent::Notification(message.to_owned()))
+            })
+            .ok();
+    }
+
+    fn http_client(&self) -> Arc<dyn HttpClient> {
+        self.http_client.clone()
+    }
+
+    fn worktree_id(&self) -> WorktreeId {
+        self.worktree.id()
+    }
+
+    fn worktree_root_path(&self) -> &Path {
+        self.worktree.abs_path().as_ref()
+    }
+
+    async fn shell_env(&self) -> HashMap<String, String> {
+        let task = self.load_shell_env_task.clone();
+        task.await.unwrap_or_default()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn which(&self, command: &OsStr) -> Option<PathBuf> {
+        let worktree_abs_path = self.worktree.abs_path();
+        let shell_path = self.shell_env().await.get("PATH").cloned();
+        which::which_in(command, shell_path.as_ref(), worktree_abs_path).ok()
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn which(&self, command: &OsStr) -> Option<PathBuf> {
+        // todo(windows) Getting the shell env variables in a current directory on Windows is more complicated than other platforms
+        //               there isn't a 'default shell' necessarily. The closest would be the default profile on the windows terminal
+        //               SEE: https://learn.microsoft.com/en-us/windows/terminal/customize-settings/startup
+        which::which(command).ok()
+    }
+
+    async fn try_exec(&self, command: LanguageServerBinary) -> Result<()> {
+        let working_dir = self.worktree_root_path();
+        let output = smol::process::Command::new(&command.path)
+            .args(command.arguments)
+            .envs(command.env.clone().unwrap_or_default())
+            .current_dir(working_dir)
+            .output()
+            .await?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "{}, stdout: {:?}, stderr: {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    fn update_status(
+        &self,
+        server_name: LanguageServerName,
+        status: language::LanguageServerBinaryStatus,
+    ) {
+        self.language_registry
+            .update_lsp_status(server_name, status);
+    }
+
+    async fn read_text_file(&self, path: PathBuf) -> Result<String> {
+        if self.worktree.entry_for_path(&path).is_none() {
+            return Err(anyhow!("no such path {path:?}"));
+        };
+        self.fs.load(&path).await
     }
 }
 
@@ -7036,24 +7175,15 @@ impl HttpClient for BlockedHttpClient {
     }
 }
 
-pub fn language_server_settings<'a, 'b: 'a>(
-    delegate: &'a dyn LspAdapterDelegate,
-    language: &str,
-    cx: &'b AppContext,
-) -> Option<&'a LspSettings> {
-    ProjectSettings::get(
-        Some(SettingsLocation {
-            worktree_id: delegate.worktree_id(),
-            path: delegate.worktree_root_path(),
-        }),
-        cx,
-    )
-    .lsp
-    .get(language)
+struct SshLspAdapterDelegate {
+    lsp_store: WeakModel<LspStore>,
+    worktree: worktree::Snapshot,
+    upstream_client: AnyProtoClient,
+    language_registry: Arc<LanguageRegistry>,
 }
 
 #[async_trait]
-impl LspAdapterDelegate for ProjectLspAdapterDelegate {
+impl LspAdapterDelegate for SshLspAdapterDelegate {
     fn show_notification(&self, message: &str, cx: &mut AppContext) {
         self.lsp_store
             .update(cx, |_, cx| {
@@ -7063,7 +7193,7 @@ impl LspAdapterDelegate for ProjectLspAdapterDelegate {
     }
 
     fn http_client(&self) -> Arc<dyn HttpClient> {
-        self.http_client.clone()
+        Arc::new(BlockedHttpClient)
     }
 
     fn worktree_id(&self) -> WorktreeId {
@@ -7075,55 +7205,50 @@ impl LspAdapterDelegate for ProjectLspAdapterDelegate {
     }
 
     async fn shell_env(&self) -> HashMap<String, String> {
-        if let Some(upstream_client) = &self.upstream_client {
-            use rpc::proto::SSH_PROJECT_ID;
+        use rpc::proto::SSH_PROJECT_ID;
 
-            return upstream_client
-                .request(proto::ShellEnv {
-                    project_id: SSH_PROJECT_ID,
-                    worktree_id: self.worktree_id().to_proto(),
-                })
-                .await
-                .map(|response| response.env.into_iter().collect())
-                .unwrap_or_default();
-        }
-
-        let task = self.load_shell_env_task.clone();
-        task.await.unwrap_or_default()
+        self.upstream_client
+            .request(proto::ShellEnv {
+                project_id: SSH_PROJECT_ID,
+                worktree_id: self.worktree_id().to_proto(),
+            })
+            .await
+            .map(|response| response.env.into_iter().collect())
+            .unwrap_or_default()
     }
 
-    #[cfg(not(target_os = "windows"))]
     async fn which(&self, command: &OsStr) -> Option<PathBuf> {
-        if let Some(upstream_client) = &self.upstream_client {
-            use rpc::proto::SSH_PROJECT_ID;
+        use rpc::proto::SSH_PROJECT_ID;
 
-            return upstream_client
-                .request(proto::WhichCommand {
-                    project_id: SSH_PROJECT_ID,
-                    worktree_id: self.worktree_id().to_proto(),
-                    command: command.to_string_lossy().to_string(),
-                })
-                .await
-                .log_err()
-                .and_then(|response| response.path)
-                .map(PathBuf::from);
-        }
-
-        self.fs.as_ref()?;
-
-        let worktree_abs_path = self.worktree.abs_path();
-        let shell_path = self.shell_env().await.get("PATH").cloned();
-        which::which_in(command, shell_path.as_ref(), worktree_abs_path).ok()
+        self.upstream_client
+            .request(proto::WhichCommand {
+                project_id: SSH_PROJECT_ID,
+                worktree_id: self.worktree_id().to_proto(),
+                command: command.to_string_lossy().to_string(),
+            })
+            .await
+            .log_err()
+            .and_then(|response| response.path)
+            .map(PathBuf::from)
     }
 
-    #[cfg(target_os = "windows")]
-    async fn which(&self, command: &OsStr) -> Option<PathBuf> {
-        self.fs.as_ref()?;
-
-        // todo(windows) Getting the shell env variables in a current directory on Windows is more complicated than other platforms
-        //               there isn't a 'default shell' necessarily. The closest would be the default profile on the windows terminal
-        //               SEE: https://learn.microsoft.com/en-us/windows/terminal/customize-settings/startup
-        which::which(command).ok()
+    async fn try_exec(&self, command: LanguageServerBinary) -> Result<()> {
+        self.upstream_client
+            .request(proto::TryExec {
+                project_id: rpc::proto::SSH_PROJECT_ID,
+                worktree_id: self.worktree.id().to_proto(),
+                binary: Some(proto::LanguageServerCommand {
+                    path: command.path.to_string_lossy().to_string(),
+                    arguments: command
+                        .arguments
+                        .into_iter()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .collect(),
+                    env: command.env.unwrap_or_default().into_iter().collect(),
+                }),
+            })
+            .await?;
+        Ok(())
     }
 
     fn update_status(
@@ -7136,15 +7261,16 @@ impl LspAdapterDelegate for ProjectLspAdapterDelegate {
     }
 
     async fn read_text_file(&self, path: PathBuf) -> Result<String> {
-        if self.worktree.entry_for_path(&path).is_none() {
-            return Err(anyhow!("no such path {path:?}"));
-        };
-        if let Some(fs) = &self.fs {
-            let content = fs.load(&path).await?;
-            Ok(content)
-        } else {
-            return Err(anyhow!("cannot open {path:?} on ssh host (yet!)"));
-        }
+        self.upstream_client
+            .request(proto::ReadTextFile {
+                project_id: rpc::proto::SSH_PROJECT_ID,
+                path: Some(proto::ProjectPath {
+                    worktree_id: self.worktree.id().to_proto(),
+                    path: path.to_string_lossy().to_string(),
+                }),
+            })
+            .await
+            .map(|r| r.text)
     }
 }
 

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use collections::HashMap;
 use futures::StreamExt;
 use gpui::{AppContext, AsyncAppContext, Task};
 use http_client::github::latest_github_release;
@@ -454,6 +455,7 @@ impl ContextProvider for GoContextProvider {
         &self,
         variables: &TaskVariables,
         location: &Location,
+        _: Option<&HashMap<String, String>>,
         cx: &mut gpui::AppContext,
     ) -> Result<TaskVariables> {
         let local_abs_path = location
@@ -614,7 +616,7 @@ mod tests {
     #[gpui::test]
     async fn test_go_label_for_completion() {
         let adapter = Arc::new(GoLspAdapter);
-        let language = language("go", tree_sitter_go::language());
+        let language = language("go", tree_sitter_go::LANGUAGE.into());
 
         let theme = SyntaxTheme::new_test([
             ("type", Hsla::default()),

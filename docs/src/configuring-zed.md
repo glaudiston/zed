@@ -293,6 +293,38 @@ List of `string` values
 
 `boolean` values
 
+## Cursor Shape
+
+- Description: Cursor shape for the default editor.
+- Setting: `cursor_shape`
+- Default: `bar`
+
+**Options**
+
+1. A vertical bar:
+
+```json
+"cursor_shape": "bar"
+```
+
+2. A block that surrounds the following character:
+
+```json
+"cursor_shape": "block"
+```
+
+3. An underline that runs along the following character:
+
+```json
+"cursor_shape": "underline"
+```
+
+4. An box drawn around the following character:
+
+```json
+"cursor_shape": "hollow"
+```
+
 ## Default Dock Anchor
 
 - Description: The default anchor for new docks.
@@ -1179,7 +1211,7 @@ Or to set a `socks5` proxy:
 - Setting: `search`
 - Default:
 
-```
+```json
 "search": {
   "whole_word": false,
   "case_sensitive": false,
@@ -1516,14 +1548,14 @@ The name of any font family installed on the user's system
 
 See Buffer Font Features
 
-```jsonc
+```json
 {
   "terminal": {
     "font_features": {
-      "calt": false,
+      "calt": false
       // See Buffer Font Features for more features
-    },
-  },
+    }
+  }
 }
 ```
 
@@ -1537,33 +1569,33 @@ See Buffer Font Features
 
 1. Use a line height that's `comfortable` for reading, 1.618. (default)
 
-```jsonc
+```json
 {
   "terminal": {
-    "line_height": "comfortable",
-  },
+    "line_height": "comfortable"
+  }
 }
 ```
 
 2. Use a `standard` line height, 1.3. This option is useful for TUIs, particularly if they use box characters
 
-```jsonc
+```json
 {
   "terminal": {
-    "line_height": "standard",
-  },
+    "line_height": "standard"
+  }
 }
 ```
 
 3.  Use a custom line height.
 
-```jsonc
+```json
 {
   "terminal": {
     "line_height": {
-      "custom": 2,
-    },
-  },
+      "custom": 2
+    }
+  }
 }
 ```
 

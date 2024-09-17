@@ -6,7 +6,7 @@ use gpui::{div, AnyView, AppContext, AsyncAppContext, ModelContext, Subscription
 use http_client::HttpClient;
 use ollama::{
     get_models, preload_model, stream_chat_completion, ChatMessage, ChatOptions, ChatRequest,
-    ChatResponseDelta, OllamaToolCall, OLLAMA_API_KEY_VAR, OLLAMA_API_URL_DEFAULT,
+    ChatResponseDelta, KeepAlive, OllamaToolCall, OLLAMA_API_KEY_VAR, OLLAMA_API_URL_DEFAULT,
     OLLAMA_API_URL_VAR,
 };
 use schemars::JsonSchema;
@@ -45,6 +45,8 @@ pub struct AvailableModel {
     pub display_name: Option<String>,
     /// The Context Length parameter to the model (aka num_ctx or n_ctx)
     pub max_tokens: usize,
+    /// The number of seconds to keep the connection open after the last request
+    pub keep_alive: Option<KeepAlive>,
 }
 
 pub struct OllamaLanguageModelProvider {
@@ -261,7 +263,7 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
                     name: model.name.clone(),
                     display_name: model.display_name.clone(),
                     max_tokens: model.max_tokens,
-                    keep_alive: None,
+                    keep_alive: model.keep_alive.clone(),
                 },
             );
         }
@@ -697,15 +699,11 @@ impl Render for ConfigurationView {
                 .child(h_flex().gap_1().child(self.render_api_key_editor(cx)).when(
                     !api_key_from_env,
                     |flex| {
-                        flex.children(vec![
-                            IconButton::new("save-api-key", IconName::Save)
-                                .on_click(
-                                    cx.listener(|this, _, cx| {
-                                        this.save_api_key(&menu::Confirm, cx)
-                                    }),
-                                )
-                                .tooltip(|cx| Tooltip::text("Save the custom API key", cx)),
-                        ])
+                        flex.children(vec![IconButton::new("save-api-key", IconName::Save)
+                            .on_click(
+                                cx.listener(|this, _, cx| this.save_api_key(&menu::Confirm, cx)),
+                            )
+                            .tooltip(|cx| Tooltip::text("Save the custom API key", cx))])
                     },
                 ))
                 .child(

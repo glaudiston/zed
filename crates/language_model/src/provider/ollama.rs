@@ -81,8 +81,10 @@ impl State {
         })
     }
 
-    #[allow(dead_code)]
     fn get_api_url(&self, cx: &mut ModelContext<Self>) -> String {
+        if let Ok(api_url) = std::env::var(OLLAMA_API_URL_VAR) {
+            return api_url;
+        }
         if let Some(api_url) = &self.api_url {
             return api_url.clone();
         }
@@ -571,6 +573,11 @@ impl ConfigurationView {
     fn save_api_key(&mut self, _: &menu::Confirm, cx: &mut ViewContext<Self>) {
         let api_key = self.api_key_editor.read(cx).text(cx);
         if api_key.is_empty() {
+            self.state.update(cx, |state, cx| {
+                state.reset_api_key(cx).detach_and_log_err(cx);
+            });
+
+            cx.notify();
             return;
         }
 
@@ -581,19 +588,6 @@ impl ConfigurationView {
                 .await
         })
         .detach_and_log_err(cx);
-    }
-
-    fn reset_api_key(&self, cx: &mut ViewContext<Self>) {
-        self.state.update(cx, |state, cx| {
-            state.reset_api_key(cx).detach_and_log_err(cx);
-        });
-
-        // Clear the API key editor
-        self.api_key_editor.update(cx, |editor, cx| {
-            editor.set_text("", cx);
-        });
-
-        cx.notify();
     }
 
     fn reset_api_url(&self, cx: &mut ViewContext<Self>) {
@@ -711,9 +705,6 @@ impl Render for ConfigurationView {
                                     }),
                                 )
                                 .tooltip(|cx| Tooltip::text("Save the custom API key", cx)),
-                            IconButton::new("reset-api-key", IconName::RotateCcw)
-                                .on_click(cx.listener(|this, _, cx| this.reset_api_key(cx)))
-                                .tooltip(|cx| Tooltip::text("Remove the API key", cx)),
                         ])
                     },
                 ))

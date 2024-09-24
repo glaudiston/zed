@@ -384,8 +384,9 @@ pub trait LspAdapter: 'static + Send + Sync {
                     .await
                 {
                     log::info!(
-                        "failed to fetch newest version of language server {:?}. falling back to using {:?}",
+                        "failed to fetch newest version of language server {:?}. error: {:?}, falling back to using {:?}",
                         self.name(),
+                        error,
                         prev_downloaded_binary.path
                     );
                     binary = Ok(prev_downloaded_binary);
@@ -564,6 +565,7 @@ async fn try_fetch_server_binary<L: LspAdapter + 'static + Send + Sync + ?Sized>
     let name = adapter.name();
     log::info!("fetching latest version of language server {:?}", name.0);
     delegate.update_status(name.clone(), LanguageServerBinaryStatus::CheckingForUpdate);
+
     let latest_version = adapter
         .fetch_latest_server_version(delegate.as_ref())
         .await?;

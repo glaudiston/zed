@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use fs::Fs;
 use gpui::{AppContext, AsyncAppContext, Context, Model, ModelContext};
 use language::{proto::serialize_operation, Buffer, BufferEvent, LanguageRegistry};
-use node_runtime::DummyNodeRuntime;
+use node_runtime::NodeRuntime;
 use project::{
     buffer_store::{BufferStore, BufferStoreEvent},
     project_settings::SettingsObserver,
@@ -50,14 +50,13 @@ impl HeadlessProject {
             store
         });
         let buffer_store = cx.new_model(|cx| {
-            let mut buffer_store =
-                BufferStore::new(worktree_store.clone(), Some(SSH_PROJECT_ID), cx);
+            let mut buffer_store = BufferStore::local(worktree_store.clone(), cx);
             buffer_store.shared(SSH_PROJECT_ID, session.clone().into(), cx);
             buffer_store
         });
         let prettier_store = cx.new_model(|cx| {
             PrettierStore::new(
-                DummyNodeRuntime::new(),
+                NodeRuntime::unavailable(),
                 fs.clone(),
                 languages.clone(),
                 worktree_store.clone(),
@@ -108,6 +107,7 @@ impl HeadlessProject {
         session.subscribe_to_entity(SSH_PROJECT_ID, &settings_observer);
 
         client.add_request_handler(cx.weak_model(), Self::handle_list_remote_directory);
+        client.add_request_handler(cx.weak_model(), Self::handle_check_file_exists);
 
         client.add_model_request_handler(Self::handle_add_worktree);
         client.add_model_request_handler(Self::handle_open_buffer_by_path);
@@ -297,5 +297,21 @@ impl HeadlessProject {
             }
         }
         Ok(proto::ListRemoteDirectoryResponse { entries })
+    }
+
+    pub async fn handle_check_file_exists(
+        this: Model<Self>,
+        envelope: TypedEnvelope<proto::CheckFileExists>,
+        cx: AsyncAppContext,
+    ) -> Result<proto::CheckFileExistsResponse> {
+        let fs = cx.read_model(&this, |this, _| this.fs.clone())?;
+        let expanded = shellexpand::tilde(&envelope.payload.path).to_string();
+
+        let exists = fs.is_file(&PathBuf::from(expanded.clone())).await;
+
+        Ok(proto::CheckFileExistsResponse {
+            exists,
+            path: expanded,
+        })
     }
 }

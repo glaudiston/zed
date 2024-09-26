@@ -425,15 +425,22 @@ fn main() {
     app.on_reopen(move |cx| {
         if let Some(app_state) = AppState::try_global(cx).and_then(|app_state| app_state.upgrade())
         {
-            cx.spawn({
-                let app_state = app_state.clone();
-                |mut cx| async move {
-                    if let Err(e) = restore_or_create_workspace(app_state, &mut cx).await {
-                        fail_to_open_window_async(e, &mut cx)
+            let ui_has_launched = cx
+                .try_global::<AppMode>()
+                .map(|mode| matches!(mode, AppMode::Ui))
+                .unwrap_or(false);
+
+            if ui_has_launched {
+                cx.spawn({
+                    let app_state = app_state.clone();
+                    |mut cx| async move {
+                        if let Err(e) = restore_or_create_workspace(app_state, &mut cx).await {
+                            fail_to_open_window_async(e, &mut cx)
+                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+            }
         }
     });
 
@@ -481,7 +488,7 @@ fn main() {
         cx.observe_global::<SettingsStore>(move |cx| {
             let settings = &ProjectSettings::get_global(cx).node;
             let options = NodeBinaryOptions {
-                allow_path_lookup: !settings.disable_path_lookup.unwrap_or_default(),
+                allow_path_lookup: !settings.ignore_system_version.unwrap_or_default(),
                 // TODO: Expose this setting
                 allow_binary_download: true,
                 use_paths: settings.path.as_ref().map(|node_path| {

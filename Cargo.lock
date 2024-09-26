@@ -2409,7 +2409,6 @@ dependencies = [
  "cocoa 0.26.0",
  "collections",
  "feature_flags",
- "fs",
  "futures 0.3.30",
  "gpui",
  "http_client",
@@ -9124,6 +9123,7 @@ dependencies = [
  "gpui",
  "http_client",
  "language",
+ "languages",
  "log",
  "lsp",
  "node_runtime",
@@ -10500,6 +10500,7 @@ dependencies = [
  "futures 0.3.30",
  "gpui",
  "parking_lot",
+ "paths",
  "serde",
  "serde_json",
  "snippet",
@@ -14390,7 +14391,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.155.0"
+version = "0.156.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
@@ -14687,7 +14688,7 @@ dependencies = [
 
 [[package]]
 name = "zed_terraform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]

@@ -1736,7 +1736,7 @@ See Buffer Font Features
 
 ## Terminal: Detect Virtual Environments {#terminal-detect_venv}
 
-- Description: Activate the [Python Virtual Environment](https://docs.python.org/3/library/venv.html), if one is found, in the terminal's working directory (as resolved by the working_directory and automatically activating the virtual environemtn
+- Description: Activate the [Python Virtual Environment](https://docs.python.org/3/library/venv.html), if one is found, in the terminal's working directory (as resolved by the working_directory and automatically activating the virtual environment.
 - Setting: `detect_venv`
 - Default:
 
@@ -1954,7 +1954,7 @@ Run the `theme selector: toggle` action in the command palette to see a current 
     "auto_reveal_entries": true,
     "auto_fold_dirs": true,
     "scrollbar": {
-      "show": "always"
+      "show": null
     }
   }
 }
@@ -2074,13 +2074,13 @@ Run the `theme selector: toggle` action in the command palette to see a current 
 
 ### Scrollbar
 
-- Description: Scrollbar related settings. Possible values: "always", "never".
+- Description: Scrollbar related settings. Possible values: null, "auto", "system", "always", "never". Inherits editor settings when absent, see its description for more details.
 - Setting: `scrollbar`
 - Default:
 
 ```json
 "scrollbar": {
-    "show": "always"
+    "show": null
 }
 ```
 

@@ -10711,6 +10711,7 @@ dependencies = [
  "libsqlite3-sys",
  "parking_lot",
  "smol",
+ "sqlformat",
  "thread_local",
  "util",
  "uuid",
@@ -14859,6 +14860,13 @@ dependencies = [
 [[package]]
 name = "zed_prisma"
 version = "0.0.3"
+dependencies = [
+ "zed_extension_api 0.1.0",
+]
+
+[[package]]
+name = "zed_proto"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]

@@ -9003,7 +9003,6 @@ dependencies = [
  "gpui",
  "language",
  "log",
- "markdown",
  "menu",
  "ordered-float 2.10.1",
  "picker",
@@ -9166,6 +9165,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo_toml",
+ "clap",
  "client",
  "clock",
  "env_logger",
@@ -10999,6 +10999,7 @@ dependencies = [
  "theme",
  "title_bar",
  "ui",
+ "ureq_client",
 ]
 
 [[package]]
@@ -14325,6 +14326,7 @@ dependencies = [
  "parking_lot",
  "postage",
  "project",
+ "release_channel",
  "remote",
  "schemars",
  "serde",
@@ -14852,7 +14854,7 @@ dependencies = [
 
 [[package]]
 name = "zed_php"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]
@@ -14866,7 +14868,7 @@ dependencies = [
 
 [[package]]
 name = "zed_proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]

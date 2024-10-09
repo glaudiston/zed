@@ -25,6 +25,8 @@ enum Commands {
     },
     Proxy {
         #[arg(long)]
+        reconnect: bool,
+        #[arg(long)]
         identifier: String,
     },
     Version,
@@ -37,7 +39,8 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() -> Result<()> {
-    use remote_server::unix::{execute_proxy, execute_run, init_logging};
+    use remote::proxy::ProxyLaunchError;
+    use remote_server::unix::{execute_proxy, execute_run, init};
 
     let cli = Cli::parse();
 
@@ -48,12 +51,23 @@ fn main() -> Result<()> {
             stdin_socket,
             stdout_socket,
         }) => {
-            init_logging(Some(log_file))?;
+            init(Some(log_file))?;
             execute_run(pid_file, stdin_socket, stdout_socket)
         }
-        Some(Commands::Proxy { identifier }) => {
-            init_logging(None)?;
-            execute_proxy(identifier)
+        Some(Commands::Proxy {
+            identifier,
+            reconnect,
+        }) => {
+            init(None)?;
+            match execute_proxy(identifier, reconnect) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    if let Some(err) = err.downcast_ref::<ProxyLaunchError>() {
+                        std::process::exit(err.to_exit_code());
+                    }
+                    Err(err)
+                }
+            }
         }
         Some(Commands::Version) => {
             eprintln!("{}", env!("ZED_PKG_VERSION"));

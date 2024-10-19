@@ -9304,6 +9304,7 @@ dependencies = [
  "system-configuration 0.6.1",
  "tokio",
  "tokio-rustls 0.26.0",
+ "tokio-socks",
  "tokio-util",
  "tower-service",
  "url",
@@ -12002,6 +12003,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -14741,7 +14743,7 @@ dependencies = [
 
 [[package]]
 name = "zed_elixir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]
@@ -14866,13 +14868,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed_svelte"
-version = "0.2.0"
-dependencies = [
- "zed_extension_api 0.1.0",
-]
-
-[[package]]
 name = "zed_terraform"
 version = "0.1.1"
 dependencies = [
@@ -14897,14 +14892,6 @@ dependencies = [
 name = "zed_uiua"
 version = "0.0.1"
 dependencies = [
- "zed_extension_api 0.1.0",
-]
-
-[[package]]
-name = "zed_vue"
-version = "0.1.0"
-dependencies = [
- "serde",
  "zed_extension_api 0.1.0",
 ]
 

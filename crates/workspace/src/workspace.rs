@@ -31,7 +31,7 @@ use futures::{
 };
 use gpui::{
     action_as, actions, canvas, impl_action_as, impl_actions, point, relative, size,
-    transparent_black, Action, AnyElement, AnyView, AnyWeakView, AppContext, AsyncAppContext,
+    transparent_black, Action, AnyView, AnyWeakView, AppContext, AsyncAppContext,
     AsyncWindowContext, Bounds, CursorStyle, Decorations, DragMoveEvent, Entity as _, EntityId,
     EventEmitter, Flatten, FocusHandle, FocusableView, Global, Hsla, KeyContext, Keystroke,
     ManagedView, Model, ModelContext, MouseButton, PathPromptOptions, Point, PromptLevel, Render,
@@ -762,8 +762,6 @@ pub struct Workspace {
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
     on_prompt_for_open_path: Option<PromptForOpenPath>,
-    render_disconnected_overlay:
-        Option<Box<dyn Fn(&mut Self, &mut ViewContext<Self>) -> AnyElement>>,
     serializable_items_tx: UnboundedSender<Box<dyn SerializableItemHandle>>,
     serialized_ssh_project: Option<SerializedSshProject>,
     _items_serializer: Task<Result<()>>,
@@ -1067,7 +1065,6 @@ impl Workspace {
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
             on_prompt_for_open_path: None,
-            render_disconnected_overlay: None,
             serializable_items_tx,
             _items_serializer,
             session_id: Some(session_id),
@@ -1470,13 +1467,6 @@ impl Workspace {
 
     pub fn set_serialized_ssh_project(&mut self, serialized_ssh_project: SerializedSshProject) {
         self.serialized_ssh_project = Some(serialized_ssh_project);
-    }
-
-    pub fn set_render_disconnected_overlay(
-        &mut self,
-        render: impl Fn(&mut Self, &mut ViewContext<Self>) -> AnyElement + 'static,
-    ) {
-        self.render_disconnected_overlay = Some(Box::new(render))
     }
 
     pub fn prompt_for_open_path(
@@ -1885,37 +1875,6 @@ impl Workspace {
             }
             Ok(true)
         })
-    }
-
-    pub fn open(&mut self, _: &Open, cx: &mut ViewContext<Self>) {
-        self.client()
-            .telemetry()
-            .report_app_event("open project".to_string());
-        let paths = self.prompt_for_open_path(
-            PathPromptOptions {
-                files: true,
-                directories: true,
-                multiple: true,
-            },
-            DirectoryLister::Local(self.app_state.fs.clone()),
-            cx,
-        );
-
-        cx.spawn(|this, mut cx| async move {
-            let Some(paths) = paths.await.log_err().flatten() else {
-                return;
-            };
-
-            if let Some(task) = this
-                .update(&mut cx, |this, cx| {
-                    this.open_workspace_for_paths(false, paths, cx)
-                })
-                .log_err()
-            {
-                task.await.log_err();
-            }
-        })
-        .detach()
     }
 
     pub fn open_workspace_for_paths(
@@ -4355,7 +4314,6 @@ impl Workspace {
             .on_action(cx.listener(Self::send_keystrokes))
             .on_action(cx.listener(Self::add_folder_to_project))
             .on_action(cx.listener(Self::follow_next_collaborator))
-            .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::activate_pane_at_index))
             .on_action(cx.listener(|workspace, _: &Unfollow, cx| {
@@ -4746,130 +4704,158 @@ impl Render for Workspace {
                 .children(self.titlebar_item.clone())
                 .child(
                     div()
-                        .id("workspace")
-                        .bg(colors.background)
+                        .size_full()
                         .relative()
                         .flex_1()
-                        .w_full()
                         .flex()
                         .flex_col()
-                        .overflow_hidden()
-                        .border_t_1()
-                        .border_b_1()
-                        .border_color(colors.border)
-                        .child({
-                            let this = cx.view().clone();
-                            canvas(
-                                move |bounds, cx| this.update(cx, |this, _cx| this.bounds = bounds),
-                                |_, _, _| {},
-                            )
-                            .absolute()
-                            .size_full()
-                        })
-                        .when(self.zoomed.is_none(), |this| {
-                            this.on_drag_move(cx.listener(
-                                |workspace, e: &DragMoveEvent<DraggedDock>, cx| match e.drag(cx).0 {
-                                    DockPosition::Left => {
-                                        let size = e.event.position.x - workspace.bounds.left();
-                                        workspace.left_dock.update(cx, |left_dock, cx| {
-                                            left_dock.resize_active_panel(Some(size), cx);
-                                        });
-                                    }
-                                    DockPosition::Right => {
-                                        let size = workspace.bounds.right() - e.event.position.x;
-                                        workspace.right_dock.update(cx, |right_dock, cx| {
-                                            right_dock.resize_active_panel(Some(size), cx);
-                                        });
-                                    }
-                                    DockPosition::Bottom => {
-                                        let size = workspace.bounds.bottom() - e.event.position.y;
-                                        workspace.bottom_dock.update(cx, |bottom_dock, cx| {
-                                            bottom_dock.resize_active_panel(Some(size), cx);
-                                        });
-                                    }
-                                },
-                            ))
-                        })
                         .child(
                             div()
+                                .id("workspace")
+                                .bg(colors.background)
+                                .relative()
+                                .flex_1()
+                                .w_full()
                                 .flex()
-                                .flex_row()
-                                .h_full()
-                                // Left Dock
-                                .children(self.render_dock(DockPosition::Left, &self.left_dock, cx))
-                                // Panes
+                                .flex_col()
+                                .overflow_hidden()
+                                .border_t_1()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child({
+                                    let this = cx.view().clone();
+                                    canvas(
+                                        move |bounds, cx| {
+                                            this.update(cx, |this, _cx| this.bounds = bounds)
+                                        },
+                                        |_, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full()
+                                })
+                                .when(self.zoomed.is_none(), |this| {
+                                    this.on_drag_move(cx.listener(
+                                        |workspace, e: &DragMoveEvent<DraggedDock>, cx| {
+                                            match e.drag(cx).0 {
+                                                DockPosition::Left => {
+                                                    let size = e.event.position.x
+                                                        - workspace.bounds.left();
+                                                    workspace.left_dock.update(
+                                                        cx,
+                                                        |left_dock, cx| {
+                                                            left_dock.resize_active_panel(
+                                                                Some(size),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                                DockPosition::Right => {
+                                                    let size = workspace.bounds.right()
+                                                        - e.event.position.x;
+                                                    workspace.right_dock.update(
+                                                        cx,
+                                                        |right_dock, cx| {
+                                                            right_dock.resize_active_panel(
+                                                                Some(size),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                                DockPosition::Bottom => {
+                                                    let size = workspace.bounds.bottom()
+                                                        - e.event.position.y;
+                                                    workspace.bottom_dock.update(
+                                                        cx,
+                                                        |bottom_dock, cx| {
+                                                            bottom_dock.resize_active_panel(
+                                                                Some(size),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    ))
+                                })
                                 .child(
                                     div()
                                         .flex()
-                                        .flex_col()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .child(
-                                            h_flex()
-                                                .flex_1()
-                                                .when_some(paddings.0, |this, p| {
-                                                    this.child(p.border_r_1())
-                                                })
-                                                .child(self.center.render(
-                                                    &self.project,
-                                                    &self.follower_states,
-                                                    self.active_call(),
-                                                    &self.active_pane,
-                                                    self.zoomed.as_ref(),
-                                                    &self.app_state,
-                                                    cx,
-                                                ))
-                                                .when_some(paddings.1, |this, p| {
-                                                    this.child(p.border_l_1())
-                                                }),
-                                        )
+                                        .flex_row()
+                                        .h_full()
+                                        // Left Dock
                                         .children(self.render_dock(
-                                            DockPosition::Bottom,
-                                            &self.bottom_dock,
+                                            DockPosition::Left,
+                                            &self.left_dock,
+                                            cx,
+                                        ))
+                                        // Panes
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .child(
+                                                    h_flex()
+                                                        .flex_1()
+                                                        .when_some(paddings.0, |this, p| {
+                                                            this.child(p.border_r_1())
+                                                        })
+                                                        .child(self.center.render(
+                                                            &self.project,
+                                                            &self.follower_states,
+                                                            self.active_call(),
+                                                            &self.active_pane,
+                                                            self.zoomed.as_ref(),
+                                                            &self.app_state,
+                                                            cx,
+                                                        ))
+                                                        .when_some(paddings.1, |this, p| {
+                                                            this.child(p.border_l_1())
+                                                        }),
+                                                )
+                                                .children(self.render_dock(
+                                                    DockPosition::Bottom,
+                                                    &self.bottom_dock,
+                                                    cx,
+                                                )),
+                                        )
+                                        // Right Dock
+                                        .children(self.render_dock(
+                                            DockPosition::Right,
+                                            &self.right_dock,
                                             cx,
                                         )),
                                 )
-                                // Right Dock
-                                .children(self.render_dock(
-                                    DockPosition::Right,
-                                    &self.right_dock,
-                                    cx,
-                                )),
-                        )
-                        .children(self.zoomed.as_ref().and_then(|view| {
-                            let zoomed_view = view.upgrade()?;
-                            let div = div()
-                                .occlude()
-                                .absolute()
-                                .overflow_hidden()
-                                .border_color(colors.border)
-                                .bg(colors.background)
-                                .child(zoomed_view)
-                                .inset_0()
-                                .shadow_lg();
+                                .children(self.zoomed.as_ref().and_then(|view| {
+                                    let zoomed_view = view.upgrade()?;
+                                    let div = div()
+                                        .occlude()
+                                        .absolute()
+                                        .overflow_hidden()
+                                        .border_color(colors.border)
+                                        .bg(colors.background)
+                                        .child(zoomed_view)
+                                        .inset_0()
+                                        .shadow_lg();
 
-                            Some(match self.zoomed_position {
-                                Some(DockPosition::Left) => div.right_2().border_r_1(),
-                                Some(DockPosition::Right) => div.left_2().border_l_1(),
-                                Some(DockPosition::Bottom) => div.top_2().border_t_1(),
-                                None => div.top_2().bottom_2().left_2().right_2().border_1(),
-                            })
-                        }))
-                        .child(self.modal_layer.clone())
-                        .children(self.render_notifications(cx)),
-                )
-                .child(self.status_bar.clone())
-                .children(if self.project.read(cx).is_disconnected(cx) {
-                    if let Some(render) = self.render_disconnected_overlay.take() {
-                        let result = render(self, cx);
-                        self.render_disconnected_overlay = Some(render);
-                        Some(result)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }),
+                                    Some(match self.zoomed_position {
+                                        Some(DockPosition::Left) => div.right_2().border_r_1(),
+                                        Some(DockPosition::Right) => div.left_2().border_l_1(),
+                                        Some(DockPosition::Bottom) => div.top_2().border_t_1(),
+                                        None => {
+                                            div.top_2().bottom_2().left_2().right_2().border_1()
+                                        }
+                                    })
+                                }))
+                                .children(self.render_notifications(cx)),
+                        )
+                        .child(self.status_bar.clone())
+                        .child(self.modal_layer.clone()),
+                ),
             cx,
         )
     }
@@ -5516,6 +5502,7 @@ pub fn join_hosted_project(
 pub fn open_ssh_project(
     window: WindowHandle<Workspace>,
     connection_options: SshConnectionOptions,
+    cancel_rx: oneshot::Receiver<()>,
     delegate: Arc<dyn SshClientDelegate>,
     app_state: Arc<AppState>,
     paths: Vec<PathBuf>,
@@ -5537,11 +5524,21 @@ pub fn open_ssh_project(
             workspace_id.0
         );
 
-        let session = cx
+        let session = match cx
             .update(|cx| {
-                remote::SshRemoteClient::new(unique_identifier, connection_options, delegate, cx)
+                remote::SshRemoteClient::new(
+                    unique_identifier,
+                    connection_options,
+                    cancel_rx,
+                    delegate,
+                    cx,
+                )
             })?
-            .await?;
+            .await?
+        {
+            Some(result) => result,
+            None => return Ok(()),
+        };
 
         let project = cx.update(|cx| {
             project::Project::ssh(

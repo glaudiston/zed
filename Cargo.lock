@@ -261,9 +261,9 @@ checksum = "34cd60c5e3152cef0a592f1b296f1cc93715d89d2551d85315828c3a09575ff4"
 
 [[package]]
 name = "anyhow"
-version = "1.0.89"
+version = "1.0.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86fdf8605db99b54d3cd748a44c6d04df638eb5dafb219b135d0149bd0db01f6"
+checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
 
 [[package]]
 name = "approx"
@@ -453,9 +453,11 @@ dependencies = [
  "anyhow",
  "collections",
  "derive_more",
+ "futures 0.3.30",
  "gpui",
  "language",
  "parking_lot",
+ "pretty_assertions",
  "serde",
  "serde_json",
  "workspace",
@@ -8514,6 +8516,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "settings",
+ "smallvec",
  "theme",
  "ui",
  "util",
@@ -14602,7 +14605,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.159.0"
+version = "0.160.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
@@ -14710,7 +14713,6 @@ dependencies = [
  "winresource",
  "workspace",
  "zed_actions",
- "zstd",
 ]
 
 [[package]]
@@ -14842,7 +14844,7 @@ dependencies = [
 
 [[package]]
 name = "zed_php"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]

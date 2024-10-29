@@ -61,6 +61,7 @@ pub struct State {
     api_key_from_env: bool,
     http_client: Arc<dyn HttpClient>,
     available_models: Vec<ollama::Model>,
+    fetch_model_task: Option<Task<Result<()>>>,
     _subscription: Subscription,
     fs: Arc<dyn Fs>,
 }
@@ -170,6 +171,11 @@ impl State {
         })
     }
 
+    fn restart_fetch_models_task(&mut self, cx: &mut ModelContext<Self>) {
+        let task = self.fetch_models(cx);
+        self.fetch_model_task.replace(task);
+    }
+
     fn authenticate(&mut self, cx: &mut ModelContext<Self>) -> Task<Result<()>> {
         if self.is_authenticated() {
             Task::ready(Ok(()))
@@ -202,22 +208,34 @@ impl OllamaLanguageModelProvider {
         let settings = AllLanguageModelSettings::get_global(cx).ollama.clone();
         let this = Self {
             http_client: http_client.clone(),
-            state: cx.new_model(|cx| State {
-                api_url: Some(settings.api_url.clone()),
-                api_url_from_env: false,
-                api_key: None,
-                api_key_from_env: false,
-                http_client,
-                available_models: Default::default(),
-                _subscription: cx.observe_global::<SettingsStore>(|this: &mut State, cx| {
-                    this.fetch_models(cx).detach();
-                    cx.notify();
-                }),
-                fs,
+            state: cx.new_model(|cx| {
+                let subscription = cx.observe_global::<SettingsStore>({
+                    let mut settings = AllLanguageModelSettings::get_global(cx).ollama.clone();
+                    move |this: &mut State, cx| {
+                        let new_settings = &AllLanguageModelSettings::get_global(cx).ollama;
+                        if &settings != new_settings {
+                            settings = new_settings.clone();
+                            this.restart_fetch_models_task(cx);
+                            cx.notify();
+                        }
+                    }
+                });
+
+                State {
+                    api_url: Some(settings.api_url.clone()),
+                    api_url_from_env: false,
+                    api_key: None,
+                    api_key_from_env: false,
+                    http_client,
+                    available_models: Default::default(),
+                    fetch_model_task: None,
+                    _subscription: subscription,
+                    fs,
+                }
             }),
         };
         this.state
-            .update(cx, |state, cx| state.fetch_models(cx).detach());
+            .update(cx, |state, cx| state.restart_fetch_models_task(cx));
         this
     }
 }

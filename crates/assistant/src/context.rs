@@ -2,8 +2,9 @@
 mod context_tests;
 
 use crate::{
-    prompts::PromptBuilder, slash_command::SlashCommandLine, AssistantEdit, AssistantPatch,
-    AssistantPatchStatus, MessageId, MessageStatus,
+    prompts::PromptBuilder,
+    slash_command::{file_command::FileCommandMetadata, SlashCommandLine},
+    AssistantEdit, AssistantPatch, AssistantPatchStatus, MessageId, MessageStatus,
 };
 use anyhow::{anyhow, Context as _, Result};
 use assistant_slash_command::{
@@ -23,6 +24,7 @@ use gpui::{
 
 use language::{AnchorRangeExt, Bias, Buffer, LanguageRegistry, OffsetRangeExt, Point, ToOffset};
 use language_model::{
+    logging::report_assistant_event,
     provider::cloud::{MaxMonthlySpendReachedError, PaymentRequiredError},
     LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionEvent,
     LanguageModelImage, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
@@ -66,7 +68,7 @@ impl ContextId {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestType {
     /// Request a normal chat response from the model.
     Chat,
@@ -987,6 +989,20 @@ impl Context {
 
     pub fn slash_command_output_sections(&self) -> &[SlashCommandOutputSection<language::Anchor>] {
         &self.slash_command_output_sections
+    }
+
+    pub fn contains_files(&self, cx: &AppContext) -> bool {
+        let buffer = self.buffer.read(cx);
+        self.slash_command_output_sections.iter().any(|section| {
+            section.is_valid(buffer)
+                && section
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        serde_json::from_value::<FileCommandMetadata>(metadata.clone()).ok()
+                    })
+                    .is_some()
+        })
     }
 
     pub fn pending_tool_uses(&self) -> Vec<&PendingToolUse> {
@@ -1940,6 +1956,7 @@ impl Context {
                                     });
 
                                 match event {
+                                    LanguageModelCompletionEvent::StartMessage { .. } => {}
                                     LanguageModelCompletionEvent::Stop(reason) => {
                                         stop_reason = reason;
                                     }
@@ -2045,23 +2062,28 @@ impl Context {
                         None
                     };
 
-                    if let Some(telemetry) = this.telemetry.as_ref() {
-                        let language_name = this
-                            .buffer
-                            .read(cx)
-                            .language()
-                            .map(|language| language.name());
-                        telemetry.report_assistant_event(AssistantEvent {
+                    let language_name = this
+                        .buffer
+                        .read(cx)
+                        .language()
+                        .map(|language| language.name());
+                    report_assistant_event(
+                        AssistantEvent {
                             conversation_id: Some(this.id.0.clone()),
                             kind: AssistantKind::Panel,
                             phase: AssistantPhase::Response,
+                            message_id: None,
                             model: model.telemetry_id(),
                             model_provider: model.provider_id().to_string(),
                             response_latency,
                             error_message,
                             language_name: language_name.map(|name| name.to_proto()),
-                        });
-                    }
+                        },
+                        this.telemetry.clone(),
+                        cx.http_client(),
+                        model.api_key(cx),
+                        cx.background_executor(),
+                    );
 
                     if let Ok(stop_reason) = result {
                         match stop_reason {
@@ -2528,7 +2550,7 @@ impl Context {
                     let mut messages = stream.await?;
 
                     let mut replaced = !replace_old;
-                    while let Some(message) = messages.next().await {
+                    while let Some(message) = messages.stream.next().await {
                         let text = message?;
                         let mut lines = text.lines();
                         this.update(&mut cx, |this, cx| {

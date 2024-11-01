@@ -342,7 +342,6 @@ messages!(
     (FindSearchCandidates, Background),
     (FindSearchCandidatesResponse, Background),
     (CloseBuffer, Foreground),
-    (UpdateUserSettings, Foreground),
     (ShutdownRemoteServer, Foreground),
     (RemoveWorktree, Foreground),
     (LanguageServerLog, Foreground),
@@ -366,6 +365,7 @@ messages!(
     (GetPathMetadataResponse, Background),
     (GetPanicFiles, Background),
     (GetPanicFilesResponse, Background),
+    (CancelLanguageServerWork, Foreground),
 );
 
 request_messages!(
@@ -486,7 +486,8 @@ request_messages!(
     (ActivateToolchain, Ack),
     (ActiveToolchain, ActiveToolchainResponse),
     (GetPathMetadata, GetPathMetadataResponse),
-    (GetPanicFiles, GetPanicFilesResponse)
+    (GetPanicFiles, GetPanicFilesResponse),
+    (CancelLanguageServerWork, Ack),
 );
 
 entity_messages!(
@@ -557,7 +558,6 @@ entity_messages!(
     UpdateContext,
     SynchronizeContexts,
     LspExtSwitchSourceHeader,
-    UpdateUserSettings,
     LanguageServerLog,
     Toast,
     HideToast,
@@ -570,6 +570,7 @@ entity_messages!(
     ActivateToolchain,
     ActiveToolchain,
     GetPathMetadata,
+    CancelLanguageServerWork,
 );
 
 entity_messages!(

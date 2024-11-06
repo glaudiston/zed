@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use settings::{update_settings_file, Settings};
 use smol::stream::StreamExt;
 use std::{
+    any::TypeId,
     borrow::Cow,
     cmp,
     ops::{ControlFlow, Range},
@@ -441,49 +442,45 @@ impl AssistantPanel {
                             .map_or(false, |item| item.downcast::<ContextHistory>().is_some()),
                     );
                 let _pane = cx.view().clone();
-                let right_children =
-                    h_flex()
-                        .gap(Spacing::XSmall.rems(cx))
-                        .child(
-                            IconButton::new("new-context", IconName::Plus)
-                                .on_click(cx.listener(|_, _, cx| {
+                let right_children = h_flex()
+                    .gap(Spacing::XSmall.rems(cx))
+                    .child(
+                        IconButton::new("new-chat", IconName::Plus)
+                            .on_click(
+                                cx.listener(|_, _, cx| {
                                     cx.dispatch_action(NewContext.boxed_clone())
+                                }),
+                            )
+                            .tooltip(move |cx| {
+                                Tooltip::for_action_in("New Chat", &NewContext, &focus_handle, cx)
+                            }),
+                    )
+                    .child(
+                        PopoverMenu::new("assistant-panel-popover-menu")
+                            .trigger(
+                                IconButton::new("menu", IconName::EllipsisVertical)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(|cx| Tooltip::text("Toggle Assistant Menu", cx)),
+                            )
+                            .menu(move |cx| {
+                                let zoom_label = if _pane.read(cx).is_zoomed() {
+                                    "Zoom Out"
+                                } else {
+                                    "Zoom In"
+                                };
+                                let focus_handle = _pane.focus_handle(cx);
+                                Some(ContextMenu::build(cx, move |menu, _| {
+                                    menu.context(focus_handle.clone())
+                                        .action("New Chat", Box::new(NewContext))
+                                        .action("History", Box::new(DeployHistory))
+                                        .action("Prompt Library", Box::new(DeployPromptLibrary))
+                                        .action("Configure", Box::new(ShowConfiguration))
+                                        .action(zoom_label, Box::new(ToggleZoom))
                                 }))
-                                .tooltip(move |cx| {
-                                    Tooltip::for_action_in(
-                                        "New Context",
-                                        &NewContext,
-                                        &focus_handle,
-                                        cx,
-                                    )
-                                }),
-                        )
-                        .child(
-                            PopoverMenu::new("assistant-panel-popover-menu")
-                                .trigger(
-                                    IconButton::new("menu", IconName::EllipsisVertical)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(|cx| Tooltip::text("Toggle Assistant Menu", cx)),
-                                )
-                                .menu(move |cx| {
-                                    let zoom_label = if _pane.read(cx).is_zoomed() {
-                                        "Zoom Out"
-                                    } else {
-                                        "Zoom In"
-                                    };
-                                    let focus_handle = _pane.focus_handle(cx);
-                                    Some(ContextMenu::build(cx, move |menu, _| {
-                                        menu.context(focus_handle.clone())
-                                            .action("New Context", Box::new(NewContext))
-                                            .action("History", Box::new(DeployHistory))
-                                            .action("Prompt Library", Box::new(DeployPromptLibrary))
-                                            .action("Configure", Box::new(ShowConfiguration))
-                                            .action(zoom_label, Box::new(ToggleZoom))
-                                    }))
-                                }),
-                        )
-                        .into_any_element()
-                        .into();
+                            }),
+                    )
+                    .into_any_element()
+                    .into();
 
                 (Some(left_children.into_any_element()), right_children)
             });
@@ -1498,7 +1495,7 @@ pub struct ContextEditor {
     dragged_file_worktrees: Vec<Model<Worktree>>,
 }
 
-const DEFAULT_TAB_TITLE: &str = "New Context";
+const DEFAULT_TAB_TITLE: &str = "New Chat";
 const MAX_TAB_TITLE_LEN: usize = 16;
 
 impl ContextEditor {
@@ -3025,97 +3022,11 @@ impl ContextEditor {
         let Some(panel) = workspace.panel::<AssistantPanel>(cx) else {
             return;
         };
-        let Some(editor) = workspace
-            .active_item(cx)
-            .and_then(|item| item.act_as::<Editor>(cx))
-        else {
+
+        let Some(creases) = selections_creases(workspace, cx) else {
             return;
         };
 
-        let mut creases = vec![];
-        editor.update(cx, |editor, cx| {
-            let selections = editor.selections.all_adjusted(cx);
-            let buffer = editor.buffer().read(cx).snapshot(cx);
-            for selection in selections {
-                let range = editor::ToOffset::to_offset(&selection.start, &buffer)
-                    ..editor::ToOffset::to_offset(&selection.end, &buffer);
-                let selected_text = buffer.text_for_range(range.clone()).collect::<String>();
-                if selected_text.is_empty() {
-                    continue;
-                }
-                let start_language = buffer.language_at(range.start);
-                let end_language = buffer.language_at(range.end);
-                let language_name = if start_language == end_language {
-                    start_language.map(|language| language.code_fence_block_name())
-                } else {
-                    None
-                };
-                let language_name = language_name.as_deref().unwrap_or("");
-                let filename = buffer
-                    .file_at(selection.start)
-                    .map(|file| file.full_path(cx));
-                let text = if language_name == "markdown" {
-                    selected_text
-                        .lines()
-                        .map(|line| format!("> {}", line))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    let start_symbols = buffer
-                        .symbols_containing(selection.start, None)
-                        .map(|(_, symbols)| symbols);
-                    let end_symbols = buffer
-                        .symbols_containing(selection.end, None)
-                        .map(|(_, symbols)| symbols);
-
-                    let outline_text = if let Some((start_symbols, end_symbols)) =
-                        start_symbols.zip(end_symbols)
-                    {
-                        Some(
-                            start_symbols
-                                .into_iter()
-                                .zip(end_symbols)
-                                .take_while(|(a, b)| a == b)
-                                .map(|(a, _)| a.text)
-                                .collect::<Vec<_>>()
-                                .join(" > "),
-                        )
-                    } else {
-                        None
-                    };
-
-                    let line_comment_prefix = start_language
-                        .and_then(|l| l.default_scope().line_comment_prefixes().first().cloned());
-
-                    let fence = codeblock_fence_for_path(
-                        filename.as_deref(),
-                        Some(selection.start.row..=selection.end.row),
-                    );
-
-                    if let Some((line_comment_prefix, outline_text)) =
-                        line_comment_prefix.zip(outline_text)
-                    {
-                        let breadcrumb =
-                            format!("{line_comment_prefix}Excerpt from: {outline_text}\n");
-                        format!("{fence}{breadcrumb}{selected_text}\n```")
-                    } else {
-                        format!("{fence}{selected_text}\n```")
-                    }
-                };
-                let crease_title = if let Some(path) = filename {
-                    let start_line = selection.start.row + 1;
-                    let end_line = selection.end.row + 1;
-                    if start_line == end_line {
-                        format!("{}, Line {}", path.display(), start_line)
-                    } else {
-                        format!("{}, Lines {} to {}", path.display(), start_line, end_line)
-                    }
-                } else {
-                    "Quoted selection".to_string()
-                };
-                creases.push((text, crease_title));
-            }
-        });
         if creases.is_empty() {
             return;
         }
@@ -4006,6 +3917,99 @@ fn find_surrounding_code_block(snapshot: &BufferSnapshot, offset: usize) -> Opti
     None
 }
 
+pub fn selections_creases(
+    workspace: &mut workspace::Workspace,
+    cx: &mut ViewContext<Workspace>,
+) -> Option<Vec<(String, String)>> {
+    let editor = workspace
+        .active_item(cx)
+        .and_then(|item| item.act_as::<Editor>(cx))?;
+
+    let mut creases = vec![];
+    editor.update(cx, |editor, cx| {
+        let selections = editor.selections.all_adjusted(cx);
+        let buffer = editor.buffer().read(cx).snapshot(cx);
+        for selection in selections {
+            let range = editor::ToOffset::to_offset(&selection.start, &buffer)
+                ..editor::ToOffset::to_offset(&selection.end, &buffer);
+            let selected_text = buffer.text_for_range(range.clone()).collect::<String>();
+            if selected_text.is_empty() {
+                continue;
+            }
+            let start_language = buffer.language_at(range.start);
+            let end_language = buffer.language_at(range.end);
+            let language_name = if start_language == end_language {
+                start_language.map(|language| language.code_fence_block_name())
+            } else {
+                None
+            };
+            let language_name = language_name.as_deref().unwrap_or("");
+            let filename = buffer
+                .file_at(selection.start)
+                .map(|file| file.full_path(cx));
+            let text = if language_name == "markdown" {
+                selected_text
+                    .lines()
+                    .map(|line| format!("> {}", line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                let start_symbols = buffer
+                    .symbols_containing(selection.start, None)
+                    .map(|(_, symbols)| symbols);
+                let end_symbols = buffer
+                    .symbols_containing(selection.end, None)
+                    .map(|(_, symbols)| symbols);
+
+                let outline_text =
+                    if let Some((start_symbols, end_symbols)) = start_symbols.zip(end_symbols) {
+                        Some(
+                            start_symbols
+                                .into_iter()
+                                .zip(end_symbols)
+                                .take_while(|(a, b)| a == b)
+                                .map(|(a, _)| a.text)
+                                .collect::<Vec<_>>()
+                                .join(" > "),
+                        )
+                    } else {
+                        None
+                    };
+
+                let line_comment_prefix = start_language
+                    .and_then(|l| l.default_scope().line_comment_prefixes().first().cloned());
+
+                let fence = codeblock_fence_for_path(
+                    filename.as_deref(),
+                    Some(selection.start.row..=selection.end.row),
+                );
+
+                if let Some((line_comment_prefix, outline_text)) =
+                    line_comment_prefix.zip(outline_text)
+                {
+                    let breadcrumb = format!("{line_comment_prefix}Excerpt from: {outline_text}\n");
+                    format!("{fence}{breadcrumb}{selected_text}\n```")
+                } else {
+                    format!("{fence}{selected_text}\n```")
+                }
+            };
+            let crease_title = if let Some(path) = filename {
+                let start_line = selection.start.row + 1;
+                let end_line = selection.end.row + 1;
+                if start_line == end_line {
+                    format!("{}, Line {}", path.display(), start_line)
+                } else {
+                    format!("{}, Lines {} to {}", path.display(), start_line, end_line)
+                }
+            } else {
+                "Quoted selection".to_string()
+            };
+            creases.push((text, crease_title));
+        }
+    });
+    Some(creases)
+}
+
 fn render_fold_icon_button(
     editor: WeakView<Editor>,
     icon: IconName,
@@ -4178,6 +4182,21 @@ impl Item for ContextEditor {
 
     fn deactivated(&mut self, cx: &mut ViewContext<Self>) {
         self.editor.update(cx, Item::deactivated)
+    }
+
+    fn act_as_type<'a>(
+        &'a self,
+        type_id: TypeId,
+        self_handle: &'a View<Self>,
+        _: &'a AppContext,
+    ) -> Option<AnyView> {
+        if type_id == TypeId::of::<Self>() {
+            Some(self_handle.to_any())
+        } else if type_id == TypeId::of::<Editor>() {
+            Some(self.editor.to_any())
+        } else {
+            None
+        }
     }
 }
 
@@ -4755,7 +4774,7 @@ impl ConfigurationView {
                             h_flex().justify_end().child(
                                 Button::new(
                                     SharedString::from(format!("new-context-{provider_id}")),
-                                    "Open new context",
+                                    "Open New Chat",
                                 )
                                 .icon_position(IconPosition::Start)
                                 .icon(IconName::Plus)

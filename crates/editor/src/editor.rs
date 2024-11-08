@@ -49,6 +49,7 @@ pub mod test;
 
 use ::git::diff::DiffHunkStatus;
 pub(crate) use actions::*;
+pub use actions::{OpenExcerpts, OpenExcerptsSplit};
 use aho_corasick::AhoCorasick;
 use anyhow::{anyhow, Context as _, Result};
 use blink_manager::BlinkManager;
@@ -76,8 +77,8 @@ use gpui::{
     ClipboardItem, Context, DispatchPhase, ElementId, EventEmitter, FocusHandle, FocusOutEvent,
     FocusableView, FontId, FontWeight, HighlightStyle, Hsla, InteractiveText, KeyContext,
     ListSizingBehavior, Model, ModelContext, MouseButton, PaintQuad, ParentElement, Pixels, Render,
-    SharedString, Size, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextStyle,
-    TextStyleRefinement, UTF16Selection, UnderlineStyle, UniformListScrollHandle, View,
+    ScrollStrategy, SharedString, Size, StrikethroughStyle, Styled, StyledText, Subscription, Task,
+    TextStyle, TextStyleRefinement, UTF16Selection, UnderlineStyle, UniformListScrollHandle, View,
     ViewContext, ViewInputHandler, VisualContext, WeakFocusHandle, WeakView, WindowContext,
 };
 use highlight_matching_bracket::refresh_matching_bracket_highlights;
@@ -1016,7 +1017,8 @@ impl CompletionsMenu {
         cx: &mut ViewContext<Editor>,
     ) {
         self.selected_item = 0;
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         self.attempt_resolve_selected_completion_documentation(provider, cx);
         cx.notify();
     }
@@ -1031,7 +1033,8 @@ impl CompletionsMenu {
         } else {
             self.selected_item = self.matches.len() - 1;
         }
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         self.attempt_resolve_selected_completion_documentation(provider, cx);
         cx.notify();
     }
@@ -1046,7 +1049,8 @@ impl CompletionsMenu {
         } else {
             self.selected_item = 0;
         }
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         self.attempt_resolve_selected_completion_documentation(provider, cx);
         cx.notify();
     }
@@ -1057,7 +1061,8 @@ impl CompletionsMenu {
         cx: &mut ViewContext<Editor>,
     ) {
         self.selected_item = self.matches.len() - 1;
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         self.attempt_resolve_selected_completion_documentation(provider, cx);
         cx.notify();
     }
@@ -1538,7 +1543,8 @@ struct CodeActionsMenu {
 impl CodeActionsMenu {
     fn select_first(&mut self, cx: &mut ViewContext<Editor>) {
         self.selected_item = 0;
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         cx.notify()
     }
 
@@ -1548,7 +1554,8 @@ impl CodeActionsMenu {
         } else {
             self.selected_item = self.actions.len() - 1;
         }
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -1558,13 +1565,15 @@ impl CodeActionsMenu {
         } else {
             self.selected_item = 0;
         }
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         cx.notify();
     }
 
     fn select_last(&mut self, cx: &mut ViewContext<Editor>) {
         self.selected_item = self.actions.len() - 1;
-        self.scroll_handle.scroll_to_item(self.selected_item);
+        self.scroll_handle
+            .scroll_to_item(self.selected_item, ScrollStrategy::Top);
         cx.notify()
     }
 
@@ -2490,6 +2499,10 @@ impl Editor {
         buffer_position: language::Anchor,
         cx: &AppContext,
     ) -> bool {
+        if !self.snippet_stack.is_empty() {
+            return false;
+        }
+
         if let Some(provider) = self.inline_completion_provider() {
             if let Some(show_inline_completions) = self.show_inline_completions_override {
                 show_inline_completions
@@ -12567,11 +12580,11 @@ impl Editor {
         });
     }
 
-    fn open_excerpts_in_split(&mut self, _: &OpenExcerptsSplit, cx: &mut ViewContext<Self>) {
+    pub fn open_excerpts_in_split(&mut self, _: &OpenExcerptsSplit, cx: &mut ViewContext<Self>) {
         self.open_excerpts_common(true, cx)
     }
 
-    fn open_excerpts(&mut self, _: &OpenExcerpts, cx: &mut ViewContext<Self>) {
+    pub fn open_excerpts(&mut self, _: &OpenExcerpts, cx: &mut ViewContext<Self>) {
         self.open_excerpts_common(false, cx)
     }
 

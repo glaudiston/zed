@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod context_tests;
 
+use crate::slash_command_working_set::SlashCommandWorkingSet;
+use crate::ToolWorkingSet;
 use crate::{
     prompts::PromptBuilder,
     slash_command::{file_command::FileCommandMetadata, SlashCommandLine},
@@ -8,10 +10,8 @@ use crate::{
 };
 use anyhow::{anyhow, Context as _, Result};
 use assistant_slash_command::{
-    SlashCommandContent, SlashCommandEvent, SlashCommandOutputSection, SlashCommandRegistry,
-    SlashCommandResult,
+    SlashCommandContent, SlashCommandEvent, SlashCommandOutputSection, SlashCommandResult,
 };
-use assistant_tool::ToolRegistry;
 use client::{self, proto, telemetry::Telemetry};
 use clock::ReplicaId;
 use collections::{HashMap, HashSet};
@@ -95,13 +95,13 @@ pub enum ContextOperation {
         version: clock::Global,
     },
     SlashCommandStarted {
-        id: SlashCommandId,
+        id: InvokedSlashCommandId,
         output_range: Range<language::Anchor>,
         name: String,
         version: clock::Global,
     },
     SlashCommandFinished {
-        id: SlashCommandId,
+        id: InvokedSlashCommandId,
         timestamp: clock::Lamport,
         error_message: Option<String>,
         version: clock::Global,
@@ -167,7 +167,7 @@ impl ContextOperation {
             }),
             proto::context_operation::Variant::SlashCommandStarted(message) => {
                 Ok(Self::SlashCommandStarted {
-                    id: SlashCommandId(language::proto::deserialize_timestamp(
+                    id: InvokedSlashCommandId(language::proto::deserialize_timestamp(
                         message.id.context("invalid id")?,
                     )),
                     output_range: language::proto::deserialize_anchor_range(
@@ -198,7 +198,7 @@ impl ContextOperation {
             }
             proto::context_operation::Variant::SlashCommandCompleted(message) => {
                 Ok(Self::SlashCommandFinished {
-                    id: SlashCommandId(language::proto::deserialize_timestamp(
+                    id: InvokedSlashCommandId(language::proto::deserialize_timestamp(
                         message.id.context("invalid id")?,
                     )),
                     timestamp: language::proto::deserialize_timestamp(
@@ -372,7 +372,7 @@ pub enum ContextEvent {
         updated: Vec<Range<language::Anchor>>,
     },
     InvokedSlashCommandChanged {
-        command_id: SlashCommandId,
+        command_id: InvokedSlashCommandId,
     },
     ParsedSlashCommandsUpdated {
         removed: Vec<Range<language::Anchor>>,
@@ -513,7 +513,7 @@ struct PendingCompletion {
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
-pub struct SlashCommandId(clock::Lamport);
+pub struct InvokedSlashCommandId(clock::Lamport);
 
 #[derive(Clone, Debug)]
 pub struct XmlTag {
@@ -543,9 +543,10 @@ pub struct Context {
     operations: Vec<ContextOperation>,
     buffer: Model<Buffer>,
     parsed_slash_commands: Vec<ParsedSlashCommand>,
-    invoked_slash_commands: HashMap<SlashCommandId, InvokedSlashCommand>,
+    invoked_slash_commands: HashMap<InvokedSlashCommandId, InvokedSlashCommand>,
     edits_since_last_parse: language::Subscription,
-    finished_slash_commands: HashSet<SlashCommandId>,
+    pub(crate) slash_commands: Arc<SlashCommandWorkingSet>,
+    pub(crate) tools: Arc<ToolWorkingSet>,
     slash_command_output_sections: Vec<SlashCommandOutputSection<language::Anchor>>,
     pending_tool_uses_by_id: HashMap<Arc<str>, PendingToolUse>,
     message_anchors: Vec<MessageAnchor>,
@@ -599,6 +600,8 @@ impl Context {
         project: Option<Model<Project>>,
         telemetry: Option<Arc<Telemetry>>,
         prompt_builder: Arc<PromptBuilder>,
+        slash_commands: Arc<SlashCommandWorkingSet>,
+        tools: Arc<ToolWorkingSet>,
         cx: &mut ModelContext<Self>,
     ) -> Self {
         Self::new(
@@ -607,6 +610,8 @@ impl Context {
             language::Capability::ReadWrite,
             language_registry,
             prompt_builder,
+            slash_commands,
+            tools,
             project,
             telemetry,
             cx,
@@ -620,6 +625,8 @@ impl Context {
         capability: language::Capability,
         language_registry: Arc<LanguageRegistry>,
         prompt_builder: Arc<PromptBuilder>,
+        slash_commands: Arc<SlashCommandWorkingSet>,
+        tools: Arc<ToolWorkingSet>,
         project: Option<Model<Project>>,
         telemetry: Option<Arc<Telemetry>>,
         cx: &mut ModelContext<Self>,
@@ -647,7 +654,6 @@ impl Context {
             messages_metadata: Default::default(),
             parsed_slash_commands: Vec::new(),
             invoked_slash_commands: HashMap::default(),
-            finished_slash_commands: HashSet::default(),
             pending_tool_uses_by_id: HashMap::default(),
             slash_command_output_sections: Vec::new(),
             edits_since_last_parse: edits_since_last_slash_command_parse,
@@ -665,6 +671,8 @@ impl Context {
             telemetry,
             project,
             language_registry,
+            slash_commands,
+            tools,
             patches: Vec::new(),
             xml_tags: Vec::new(),
             prompt_builder,
@@ -740,6 +748,8 @@ impl Context {
         path: PathBuf,
         language_registry: Arc<LanguageRegistry>,
         prompt_builder: Arc<PromptBuilder>,
+        slash_commands: Arc<SlashCommandWorkingSet>,
+        tools: Arc<ToolWorkingSet>,
         project: Option<Model<Project>>,
         telemetry: Option<Arc<Telemetry>>,
         cx: &mut ModelContext<Self>,
@@ -751,6 +761,8 @@ impl Context {
             language::Capability::ReadWrite,
             language_registry,
             prompt_builder,
+            slash_commands,
+            tools,
             project,
             telemetry,
             cx,
@@ -905,6 +917,8 @@ impl Context {
                             name: name.into(),
                             range: output_range,
                             status: InvokedSlashCommandStatus::Running(Task::ready(())),
+                            transaction: None,
+                            timestamp: id.0,
                         },
                     );
                     cx.emit(ContextEvent::InvokedSlashCommandChanged { command_id: id });
@@ -921,10 +935,14 @@ impl Context {
                     }
                 }
                 ContextOperation::SlashCommandFinished {
-                    id, error_message, ..
+                    id,
+                    error_message,
+                    timestamp,
+                    ..
                 } => {
-                    if self.finished_slash_commands.insert(id) {
-                        if let Some(slash_command) = self.invoked_slash_commands.get_mut(&id) {
+                    if let Some(slash_command) = self.invoked_slash_commands.get_mut(&id) {
+                        if timestamp > slash_command.timestamp {
+                            slash_command.timestamp = timestamp;
                             match error_message {
                                 Some(message) => {
                                     slash_command.status =
@@ -934,9 +952,8 @@ impl Context {
                                     slash_command.status = InvokedSlashCommandStatus::Finished;
                                 }
                             }
+                            cx.emit(ContextEvent::InvokedSlashCommandChanged { command_id: id });
                         }
-
-                        cx.emit(ContextEvent::InvokedSlashCommandChanged { command_id: id });
                     }
                 }
                 ContextOperation::BufferOperation(_) => unreachable!(),
@@ -1083,7 +1100,7 @@ impl Context {
 
     pub fn invoked_slash_command(
         &self,
-        command_id: &SlashCommandId,
+        command_id: &InvokedSlashCommandId,
     ) -> Option<&InvokedSlashCommand> {
         self.invoked_slash_commands.get(command_id)
     }
@@ -1370,8 +1387,8 @@ impl Context {
             })
             .peekable();
 
-        let mut removed_slash_command_ranges = Vec::new();
-        let mut updated_slash_commands = Vec::new();
+        let mut removed_parsed_slash_command_ranges = Vec::new();
+        let mut updated_parsed_slash_commands = Vec::new();
         let mut removed_patches = Vec::new();
         let mut updated_patches = Vec::new();
         while let Some(mut row_range) = row_ranges.next() {
@@ -1393,10 +1410,11 @@ impl Context {
             self.reparse_slash_commands_in_range(
                 start..end,
                 &buffer,
-                &mut updated_slash_commands,
-                &mut removed_slash_command_ranges,
+                &mut updated_parsed_slash_commands,
+                &mut removed_parsed_slash_command_ranges,
                 cx,
             );
+            self.invalidate_pending_slash_commands(&buffer, cx);
             self.reparse_patches_in_range(
                 start..end,
                 &buffer,
@@ -1406,10 +1424,12 @@ impl Context {
             );
         }
 
-        if !updated_slash_commands.is_empty() || !removed_slash_command_ranges.is_empty() {
+        if !updated_parsed_slash_commands.is_empty()
+            || !removed_parsed_slash_command_ranges.is_empty()
+        {
             cx.emit(ContextEvent::ParsedSlashCommandsUpdated {
-                removed: removed_slash_command_ranges,
-                updated: updated_slash_commands,
+                removed: removed_parsed_slash_command_ranges,
+                updated: updated_parsed_slash_commands,
             });
         }
 
@@ -1449,7 +1469,7 @@ impl Context {
                     })
                     .map(ToOwned::to_owned)
                     .collect::<SmallVec<_>>();
-                if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
+                if let Some(command) = self.slash_commands.command(name, cx) {
                     if !command.requires_argument() || !arguments.is_empty() {
                         let start_ix = offset + command_line.name.start - 1;
                         let end_ix = offset
@@ -1476,6 +1496,37 @@ impl Context {
 
         let removed_commands = self.parsed_slash_commands.splice(old_range, new_commands);
         removed.extend(removed_commands.map(|command| command.source_range));
+    }
+
+    fn invalidate_pending_slash_commands(
+        &mut self,
+        buffer: &BufferSnapshot,
+        cx: &mut ModelContext<Self>,
+    ) {
+        let mut invalidated_command_ids = Vec::new();
+        for (&command_id, command) in self.invoked_slash_commands.iter_mut() {
+            if !matches!(command.status, InvokedSlashCommandStatus::Finished)
+                && (!command.range.start.is_valid(buffer) || !command.range.end.is_valid(buffer))
+            {
+                command.status = InvokedSlashCommandStatus::Finished;
+                cx.emit(ContextEvent::InvokedSlashCommandChanged { command_id });
+                invalidated_command_ids.push(command_id);
+            }
+        }
+
+        for command_id in invalidated_command_ids {
+            let version = self.version.clone();
+            let timestamp = self.next_timestamp();
+            self.push_op(
+                ContextOperation::SlashCommandFinished {
+                    id: command_id,
+                    timestamp,
+                    error_message: None,
+                    version: version.clone(),
+                },
+                cx,
+            );
+        }
     }
 
     fn reparse_patches_in_range(
@@ -1810,17 +1861,20 @@ impl Context {
         cx: &mut ModelContext<Self>,
     ) {
         let version = self.version.clone();
-        let command_id = SlashCommandId(self.next_timestamp());
+        let command_id = InvokedSlashCommandId(self.next_timestamp());
 
         const PENDING_OUTPUT_END_MARKER: &str = "…";
 
-        let (command_range, command_source_range, insert_position) =
+        let (command_range, command_source_range, insert_position, first_transaction) =
             self.buffer.update(cx, |buffer, cx| {
                 let command_source_range = command_source_range.to_offset(buffer);
                 let mut insertion = format!("\n{PENDING_OUTPUT_END_MARKER}");
                 if ensure_trailing_newline {
                     insertion.push('\n');
                 }
+
+                buffer.finalize_last_transaction();
+                buffer.start_transaction();
                 buffer.edit(
                     [(
                         command_source_range.end..command_source_range.end,
@@ -1829,14 +1883,22 @@ impl Context {
                     None,
                     cx,
                 );
+                let first_transaction = buffer.end_transaction(cx).unwrap();
+                buffer.finalize_last_transaction();
+
                 let insert_position = buffer.anchor_after(command_source_range.end + 1);
-                let command_range = buffer.anchor_before(command_source_range.start)
-                    ..buffer.anchor_after(
+                let command_range = buffer.anchor_after(command_source_range.start)
+                    ..buffer.anchor_before(
                         command_source_range.end + 1 + PENDING_OUTPUT_END_MARKER.len(),
                     );
                 let command_source_range = buffer.anchor_before(command_source_range.start)
                     ..buffer.anchor_before(command_source_range.end + 1);
-                (command_range, command_source_range, insert_position)
+                (
+                    command_range,
+                    command_source_range,
+                    insert_position,
+                    first_transaction,
+                )
             });
         self.reparse(cx);
 
@@ -1858,13 +1920,18 @@ impl Context {
 
                 while let Some(event) = stream.next().await {
                     let event = event?;
-                    match event {
-                        SlashCommandEvent::StartMessage {
-                            role,
-                            merge_same_roles,
-                        } => {
-                            if !merge_same_roles && Some(role) != last_role {
-                                this.update(&mut cx, |this, cx| {
+                    this.update(&mut cx, |this, cx| {
+                        this.buffer.update(cx, |buffer, _cx| {
+                            buffer.finalize_last_transaction();
+                            buffer.start_transaction()
+                        });
+
+                        match event {
+                            SlashCommandEvent::StartMessage {
+                                role,
+                                merge_same_roles,
+                            } => {
+                                if !merge_same_roles && Some(role) != last_role {
                                     let offset = this.buffer.read_with(cx, |buffer, _cx| {
                                         insert_position.to_offset(buffer)
                                     });
@@ -1874,17 +1941,15 @@ impl Context {
                                         MessageStatus::Pending,
                                         cx,
                                     );
-                                })?;
-                            }
+                                }
 
-                            last_role = Some(role);
-                        }
-                        SlashCommandEvent::StartSection {
-                            icon,
-                            label,
-                            metadata,
-                        } => {
-                            this.update(&mut cx, |this, cx| {
+                                last_role = Some(role);
+                            }
+                            SlashCommandEvent::StartSection {
+                                icon,
+                                label,
+                                metadata,
+                            } => {
                                 this.buffer.update(cx, |buffer, cx| {
                                     let insert_point = insert_position.to_point(buffer);
                                     if insert_point.column > 0 {
@@ -1898,16 +1963,14 @@ impl Context {
                                         metadata,
                                     });
                                 });
-                            })?;
-                        }
-                        SlashCommandEvent::Content(SlashCommandContent::Text {
-                            text,
-                            run_commands_in_text,
-                        }) => {
-                            this.update(&mut cx, |this, cx| {
+                            }
+                            SlashCommandEvent::Content(SlashCommandContent::Text {
+                                text,
+                                run_commands_in_text,
+                            }) => {
                                 let start = this.buffer.read(cx).anchor_before(insert_position);
 
-                                let result = this.buffer.update(cx, |buffer, cx| {
+                                this.buffer.update(cx, |buffer, cx| {
                                     buffer.edit(
                                         [(insert_position..insert_position, text)],
                                         None,
@@ -1919,41 +1982,44 @@ impl Context {
                                 if run_commands_in_text {
                                     run_commands_in_ranges.push(start..end);
                                 }
-
-                                result
-                            })?;
-                        }
-                        SlashCommandEvent::EndSection { metadata } => {
-                            if let Some(pending_section) = pending_section_stack.pop() {
-                                this.update(&mut cx, |this, cx| {
+                            }
+                            SlashCommandEvent::EndSection => {
+                                if let Some(pending_section) = pending_section_stack.pop() {
                                     let offset_range = (pending_section.start..insert_position)
                                         .to_offset(this.buffer.read(cx));
-                                    if offset_range.is_empty() {
-                                        return;
+                                    if !offset_range.is_empty() {
+                                        let range = this.buffer.update(cx, |buffer, _cx| {
+                                            buffer.anchor_after(offset_range.start)
+                                                ..buffer.anchor_before(offset_range.end)
+                                        });
+                                        this.insert_slash_command_output_section(
+                                            SlashCommandOutputSection {
+                                                range: range.clone(),
+                                                icon: pending_section.icon,
+                                                label: pending_section.label,
+                                                metadata: pending_section.metadata,
+                                            },
+                                            cx,
+                                        );
+                                        last_section_range = Some(range);
                                     }
-
-                                    let range = this.buffer.update(cx, |buffer, _cx| {
-                                        buffer.anchor_after(offset_range.start)
-                                            ..buffer.anchor_before(offset_range.end)
-                                    });
-                                    this.insert_slash_command_output_section(
-                                        SlashCommandOutputSection {
-                                            range: range.clone(),
-                                            icon: pending_section.icon,
-                                            label: pending_section.label,
-                                            metadata: metadata.or(pending_section.metadata),
-                                        },
-                                        cx,
-                                    );
-                                    last_section_range = Some(range);
-                                })?;
+                                }
                             }
                         }
-                    }
+
+                        this.buffer.update(cx, |buffer, cx| {
+                            if let Some(event_transaction) = buffer.end_transaction(cx) {
+                                buffer.merge_transactions(event_transaction, first_transaction);
+                            }
+                        });
+                    })?;
                 }
 
                 this.update(&mut cx, |this, cx| {
                     this.buffer.update(cx, |buffer, cx| {
+                        buffer.finalize_last_transaction();
+                        buffer.start_transaction();
+
                         let mut deletions = vec![(command_source_range.to_offset(buffer), "")];
                         let insert_position = insert_position.to_offset(buffer);
                         let command_range_end = command_range.end.to_offset(buffer);
@@ -1981,6 +2047,10 @@ impl Context {
                         }
 
                         buffer.edit(deletions, None, cx);
+
+                        if let Some(deletion_transaction) = buffer.end_transaction(cx) {
+                            buffer.merge_transactions(deletion_transaction, first_transaction);
+                        }
                     });
                 })?;
 
@@ -2031,6 +2101,8 @@ impl Context {
                 name: name.to_string().into(),
                 range: command_range.clone(),
                 status: InvokedSlashCommandStatus::Running(insert_output_task),
+                transaction: Some(first_transaction),
+                timestamp: command_id.0,
             },
         );
         cx.emit(ContextEvent::InvokedSlashCommandChanged { command_id });
@@ -2169,9 +2241,9 @@ impl Context {
         let mut request = self.to_completion_request(request_type, cx);
 
         if cx.has_flag::<ToolUseFeatureFlag>() {
-            let tool_registry = ToolRegistry::global(cx);
-            request.tools = tool_registry
-                .tools()
+            request.tools = self
+                .tools
+                .tools(cx)
                 .into_iter()
                 .map(|tool| LanguageModelRequestTool {
                     name: tool.name(),
@@ -3101,6 +3173,8 @@ pub struct InvokedSlashCommand {
     pub name: SharedString,
     pub range: Range<language::Anchor>,
     pub status: InvokedSlashCommandStatus,
+    pub transaction: Option<language::TransactionId>,
+    timestamp: clock::Lamport,
 }
 
 #[derive(Debug)]

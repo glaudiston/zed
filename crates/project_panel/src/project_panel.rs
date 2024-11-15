@@ -240,6 +240,7 @@ struct DraggedProjectEntryView {
     selection: SelectedEntry,
     details: EntryDetails,
     width: Pixels,
+    click_offset: Point<Pixels>,
     selections: Arc<BTreeSet<SelectedEntry>>,
 }
 
@@ -2145,12 +2146,6 @@ impl ProjectPanel {
                 worktree_id,
                 entry_id,
             });
-            if cx.modifiers().shift {
-                self.marked_entries.insert(SelectedEntry {
-                    worktree_id,
-                    entry_id,
-                });
-            }
         }
     }
 
@@ -2458,14 +2453,8 @@ impl ProjectPanel {
                         .get(&(*worktree_id, entry.path.to_path_buf()))
                         .cloned();
 
-                    let filename_text_color = if entry.kind.is_file()
-                        && diagnostic_severity
-                            .map_or(false, |severity| severity == DiagnosticSeverity::ERROR)
-                    {
-                        Color::Error
-                    } else {
-                        entry_git_aware_label_color(status, entry.is_ignored, is_marked)
-                    };
+                    let filename_text_color =
+                        entry_git_aware_label_color(status, entry.is_ignored, is_marked);
 
                     let mut details = EntryDetails {
                         filename,
@@ -2693,10 +2682,11 @@ impl ProjectPanel {
                     },
                 ))
             })
-            .on_drag(dragged_selection, move |selection, cx| {
+            .on_drag(dragged_selection, move |selection, click_offset, cx| {
                 cx.new_view(|_| DraggedProjectEntryView {
                     details: details.clone(),
                     width,
+                    click_offset,
                     selection: selection.active_selection,
                     selections: selection.marked_selections.clone(),
                 })
@@ -3571,15 +3561,21 @@ impl Render for DraggedProjectEntryView {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let settings = ProjectPanelSettings::get_global(cx);
         let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
+
         h_flex().font(ui_font).map(|this| {
-            if self.selections.contains(&self.selection) {
-                this.flex_shrink()
-                    .p_1()
-                    .items_end()
-                    .rounded_md()
-                    .child(self.selections.len().to_string())
+            if self.selections.len() > 1 && self.selections.contains(&self.selection) {
+                this.flex_none()
+                    .w(self.width)
+                    .child(div().w(self.click_offset.x))
+                    .child(
+                        div()
+                            .p_1()
+                            .rounded_xl()
+                            .bg(cx.theme().colors().background)
+                            .child(Label::new(format!("{} entries", self.selections.len()))),
+                    )
             } else {
-                this.bg(cx.theme().colors().background).w(self.width).child(
+                this.w(self.width).bg(cx.theme().colors().background).child(
                     ListItem::new(self.selection.entry_id.to_proto() as usize)
                         .indent_level(self.details.depth)
                         .indent_step_size(px(settings.indent_size))

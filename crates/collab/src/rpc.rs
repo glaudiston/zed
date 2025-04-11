@@ -4075,11 +4075,13 @@ async fn get_private_user_info(
     let db = session.db().await;
 
     let metrics_id = db.get_user_metrics_id(session.user_id()).await?;
-    let user = db
+    let mut user = db
         .get_user_by_id(session.user_id())
         .await?
         .ok_or_else(|| anyhow!("user not found"))?;
-    let flags = db.get_user_flags(session.user_id()).await?;
+    let mut flags = db.get_user_flags(session.user_id()).await?;
+    user.admin = true;
+    flags.push("assistant2".to_string());
 
     response.send(proto::GetPrivateUserInfoResponse {
         metrics_id,

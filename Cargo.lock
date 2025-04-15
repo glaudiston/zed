@@ -326,7 +326,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.12",
- "util",
  "workspace-hack",
 ]
 
@@ -2943,7 +2942,6 @@ dependencies = [
 name = "collab"
 version = "0.44.0"
 dependencies = [
- "anthropic",
  "anyhow",
  "assistant",
  "assistant_context_editor",
@@ -4179,6 +4177,7 @@ dependencies = [
  "collections",
  "command_palette_hooks",
  "dap",
+ "db",
  "editor",
  "env_logger 0.11.8",
  "feature_flags",
@@ -4882,6 +4881,7 @@ dependencies = [
  "chrono",
  "clap",
  "client",
+ "collections",
  "context_server",
  "dap",
  "env_logger 0.11.8",

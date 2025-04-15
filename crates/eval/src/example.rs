@@ -2,9 +2,10 @@ use agent::{RequestKind, ThreadEvent, ThreadStore};
 use anyhow::{Context as _, Result, anyhow};
 use assistant_tool::ToolWorkingSet;
 use client::proto::LspWorkProgress;
+use collections::HashMap;
 use dap::DapRegistry;
-use futures::channel::{mpsc, oneshot};
-use futures::{FutureExt, StreamExt as _};
+use futures::channel::mpsc;
+use futures::{FutureExt, StreamExt as _, select_biased};
 use gpui::{App, AsyncApp, Entity, Task};
 use handlebars::Handlebars;
 use language::{DiagnosticSeverity, OffsetRangeExt};
@@ -34,6 +35,8 @@ pub const EXAMPLES_DIR: &str = "./crates/eval/examples";
 pub const REPOS_DIR: &str = "./crates/eval/repos";
 pub const WORKTREES_DIR: &str = "./crates/eval/worktrees";
 
+const THREAD_EVENT_TIMEOUT: Duration = Duration::from_secs(60 * 2);
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExampleBase {
     pub url: String,
@@ -55,6 +58,8 @@ pub struct Example {
     pub criteria: String,
     /// Markdown log file to append to
     pub log_file: Arc<Mutex<File>>,
+    /// Path to markdown log file
+    pub log_file_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,6 +68,7 @@ pub struct RunOutput {
     pub diagnostics: String,
     pub response_count: usize,
     pub token_usage: TokenUsage,
+    pub tool_use_counts: HashMap<Arc<str>, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +104,7 @@ impl Example {
             prompt: fs::read_to_string(prompt_path.clone())?,
             criteria: fs::read_to_string(criteria_path.clone())?,
             log_file,
+            log_file_path,
         })
     }
 
@@ -112,6 +119,8 @@ impl Example {
     /// Set up the example by checking out the specified Git revision
     pub async fn setup(&self) -> Result<()> {
         let repo_path = repo_path_for_url(&self.base.url);
+
+        println!("{}> Fetching", self.name);
 
         run_git(
             &repo_path,
@@ -270,73 +279,90 @@ impl Example {
                 log_file.flush().log_err();
             }
 
-            let (tx, rx) = oneshot::channel();
-            let mut tx = Some(tx);
+            let tool_use_counts: Arc<Mutex<HashMap<Arc<str>, u32>>> =
+                Mutex::new(HashMap::default()).into();
 
-            let _subscription = cx.subscribe(&thread, {
+            let (thread_event_tx, mut thread_event_rx) = mpsc::unbounded();
+
+            let subscription = cx.subscribe(&thread, move |_thread, event: &ThreadEvent, _cx| {
+                thread_event_tx.unbounded_send(event.clone()).log_err();
+            });
+
+            let event_handler_task = cx.spawn({
                 let log_file = this.log_file.clone();
                 let name = this.name.clone();
-                move |thread, event: &ThreadEvent, cx| {
-                    let mut log_file = log_file.lock().unwrap();
+                let tool_use_counts = tool_use_counts.clone();
+                let thread = thread.downgrade();
+                async move |cx| {
+                    loop {
+                        let event = select_biased! {
+                            event = thread_event_rx.next() => event,
+                            _ = cx.background_executor().timer(THREAD_EVENT_TIMEOUT).fuse() => {
+                                return Err(anyhow!("Agentic loop stalled - waited {:?} without any events", THREAD_EVENT_TIMEOUT));
+                            }
+                        };
+                        let Some(event) = event else {
+                            return Err(anyhow!("ThreadEvent channel ended early"));
+                        };
 
-                    match event {
-                        ThreadEvent::Stopped(reason) => match reason {
-                            Ok(StopReason::EndTurn) => {
-                                if let Some(tx) = tx.take() {
-                                    tx.send(Ok(())).ok();
+                        let mut log_file = log_file.lock().unwrap();
+
+                        match event {
+                            ThreadEvent::Stopped(reason) => match reason {
+                                Ok(StopReason::EndTurn) => {
+                                    return Ok(());
+                                }
+                                Ok(StopReason::MaxTokens) => {
+                                    return Err(anyhow!("Exceeded maximum tokens"));
+                                }
+                                Ok(StopReason::ToolUse) => {}
+                                Err(error) => {
+                                    return Err(anyhow!(error.clone()));
+                                }
+                            },
+                            ThreadEvent::ShowError(thread_error) => {
+                                break Err(anyhow!(thread_error.clone()));
+                            }
+                            ThreadEvent::StreamedAssistantText(_, chunk) => {
+                                write!(&mut log_file, "{}", chunk).log_err();
+                            }
+                            ThreadEvent::StreamedAssistantThinking(_, chunk) => {
+                                write!(&mut log_file, "{}", chunk).log_err();
+                            }
+                            ThreadEvent::UsePendingTools { tool_uses } => {
+                                writeln!(&mut log_file, "\n\nUSING TOOLS:").log_err();
+                                for tool_use in tool_uses {
+                                    writeln!(&mut log_file, "{}: {}", tool_use.name, tool_use.input)
+                                        .log_err();
                                 }
                             }
-                            Ok(StopReason::MaxTokens) => {
-                                if let Some(tx) = tx.take() {
-                                    tx.send(Err(anyhow!("Exceeded maximum tokens"))).ok();
+                            ThreadEvent::ToolFinished {
+                                tool_use_id,
+                                pending_tool_use,
+                                ..
+                            } => {
+                                if let Some(tool_use) = pending_tool_use {
+                                    let message = format!("TOOL FINISHED: {}", tool_use.name);
+                                    println!("{name}> {message}");
+                                    writeln!(&mut log_file, "\n{}", message).log_err();
                                 }
+                                thread.update(cx, |thread, _cx| {
+                                    if let Some(tool_result) = thread.tool_result(&tool_use_id) {
+                                        writeln!(&mut log_file, "\n{}\n", tool_result.content).log_err();
+                                        let mut tool_use_counts = tool_use_counts.lock().unwrap();
+                                        *tool_use_counts
+                                            .entry(tool_result.tool_name.clone())
+                                            .or_insert(0) += 1;
+                                    }
+                                })?;
                             }
-                            Ok(StopReason::ToolUse) => {}
-                            Err(error) => {
-                                if let Some(tx) = tx.take() {
-                                    tx.send(Err(anyhow!(error.clone()))).ok();
-                                }
-                            }
-                        },
-                        ThreadEvent::ShowError(thread_error) => {
-                            if let Some(tx) = tx.take() {
-                                tx.send(Err(anyhow!(thread_error.clone()))).ok();
-                            }
+                            _ => {}
                         }
-                        ThreadEvent::StreamedAssistantText(_, chunk) => {
-                            write!(&mut log_file, "{}", chunk).log_err();
-                        }
-                        ThreadEvent::StreamedAssistantThinking(_, chunk) => {
-                            write!(&mut log_file, "{}", chunk).log_err();
-                        }
-                        ThreadEvent::UsePendingTools { tool_uses } => {
-                            writeln!(&mut log_file, "\n\nUSING TOOLS:").log_err();
-                            for tool_use in tool_uses {
-                                writeln!(&mut log_file, "{}: {}", tool_use.name, tool_use.input)
-                                    .log_err();
-                            }
-                        }
-                        ThreadEvent::ToolFinished {
-                            tool_use_id,
-                            pending_tool_use,
-                            ..
-                        } => {
-                            if let Some(tool_use) = pending_tool_use {
-                                let message = format!("TOOL FINISHED: {}", tool_use.name);
-                                println!("{name}> {message}");
-                                writeln!(&mut log_file, "\n{}", message).log_err();
-                            }
-                            if let Some(tool_result) = thread.read(cx).tool_result(tool_use_id) {
-                                let message = format!("\n{}\n", tool_result.content);
-                                writeln!(&mut log_file, "{}", message).log_err();
-                            }
-                        }
-                        _ => {}
+
+                        log_file.flush().log_err();
                     }
-
-                    log_file.flush().log_err();
                 }
-            })?;
+            });
 
             thread.update(cx, |thread, cx| {
                 let context = vec![];
@@ -344,7 +370,7 @@ impl Example {
                 thread.send_to_model(model, RequestKind::Chat, cx);
             })?;
 
-            rx.await??;
+            event_handler_task.await?;
 
             if let Some((_, lsp_store)) = lsp_open_handle_and_store.as_ref() {
                 wait_for_lang_server(lsp_store, this.name.clone(), cx).await?;
@@ -357,6 +383,7 @@ impl Example {
                 })?
                 .await?;
 
+            drop(subscription);
             drop(lsp_open_handle_and_store);
 
             thread.update(cx, |thread, _cx| {
@@ -369,13 +396,14 @@ impl Example {
                     diagnostics,
                     response_count,
                     token_usage: thread.cumulative_token_usage(),
+                    tool_use_counts: tool_use_counts.lock().unwrap().clone(),
                 }
             })
         })
     }
 
     pub async fn judge(
-        &mut self,
+        &self,
         model: Arc<dyn LanguageModel>,
         repository_diff: String,
         cx: &AsyncApp,

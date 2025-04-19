@@ -133,18 +133,23 @@ impl RenderedMessage {
     }
 
     fn push_segment(&mut self, segment: &MessageSegment, cx: &mut App) {
-        let rendered_segment = match segment {
-            MessageSegment::Thinking(text) => RenderedMessageSegment::Thinking {
-                content: parse_markdown(text.into(), self.language_registry.clone(), cx),
-                scroll_handle: ScrollHandle::default(),
-            },
-            MessageSegment::Text(text) => RenderedMessageSegment::Text(parse_markdown(
-                text.into(),
-                self.language_registry.clone(),
-                cx,
-            )),
+        match segment {
+            MessageSegment::Thinking { text, .. } => {
+                self.segments.push(RenderedMessageSegment::Thinking {
+                    content: parse_markdown(text.into(), self.language_registry.clone(), cx),
+                    scroll_handle: ScrollHandle::default(),
+                })
+            }
+            MessageSegment::Text(text) => {
+                self.segments
+                    .push(RenderedMessageSegment::Text(parse_markdown(
+                        text.into(),
+                        self.language_registry.clone(),
+                        cx,
+                    )))
+            }
+            MessageSegment::RedactedThinking(_) => {}
         };
-        self.segments.push(rendered_segment);
     }
 }
 
@@ -503,7 +508,6 @@ fn render_markdown_code_block(
         .blend(cx.theme().colors().editor_foreground.opacity(0.01));
 
     let codeblock_header = h_flex()
-        .group("codeblock_header")
         .py_1()
         .pl_1p5()
         .pr_1()
@@ -518,7 +522,7 @@ fn render_markdown_code_block(
             h_flex()
                 .gap_1()
                 .child(
-                    div().visible_on_hover("codeblock_header").child(
+                    div().visible_on_hover("codeblock_container").child(
                         IconButton::new(
                             ("copy-markdown-code", ix),
                             if codeblock_was_copied {
@@ -600,6 +604,7 @@ fn render_markdown_code_block(
         );
 
     v_flex()
+        .group("codeblock_container")
         .my_2()
         .overflow_hidden()
         .rounded_lg()
@@ -1212,6 +1217,8 @@ impl ActiveThread {
                 }
 
                 let request = language_model::LanguageModelRequest {
+                    thread_id: None,
+                    prompt_id: None,
                     messages: vec![LanguageModelRequestMessage {
                         role: language_model::Role::User,
                         content: vec![content.into()],
@@ -1277,6 +1284,7 @@ impl ActiveThread {
         }
 
         self.thread.update(cx, |thread, cx| {
+            thread.advance_prompt_id();
             thread.send_to_model(model.model, RequestKind::Chat, cx)
         });
         cx.notify();
@@ -2965,6 +2973,11 @@ impl ActiveThread {
             ))
         };
 
+        let first_default_user_rules_id = project_context
+            .default_user_rules
+            .first()
+            .map(|user_rules| user_rules.uuid);
+
         let rules_files = project_context
             .worktrees
             .iter()
@@ -3015,8 +3028,13 @@ impl ActiveThread {
                                     .icon_color(Color::Ignored)
                                     // TODO: Figure out a way to pass focus handle here so we can display the `OpenPromptLibrary`  keybinding
                                     .tooltip(Tooltip::text("View User Rules"))
-                                    .on_click(|_event, window, cx| {
-                                        window.dispatch_action(Box::new(OpenPromptLibrary), cx)
+                                    .on_click(move |_event, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenPromptLibrary {
+                                                prompt_to_focus: first_default_user_rules_id,
+                                            }),
+                                            cx,
+                                        )
                                     }),
                             ),
                     )

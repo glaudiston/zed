@@ -70,6 +70,24 @@ impl From<&str> for ThreadId {
     }
 }
 
+/// The ID of the user prompt that initiated a request.
+///
+/// This equates to the user physically submitting a message to the model (e.g., by pressing the Enter key).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize)]
+pub struct PromptId(Arc<str>);
+
+impl PromptId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string().into())
+    }
+}
+
+impl std::fmt::Display for PromptId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct MessageId(pub(crate) usize);
 
@@ -95,12 +113,21 @@ impl Message {
         self.segments.iter().all(|segment| segment.should_display())
     }
 
-    pub fn push_thinking(&mut self, text: &str) {
-        if let Some(MessageSegment::Thinking(segment)) = self.segments.last_mut() {
+    pub fn push_thinking(&mut self, text: &str, signature: Option<String>) {
+        if let Some(MessageSegment::Thinking {
+            text: segment,
+            signature: current_signature,
+        }) = self.segments.last_mut()
+        {
+            if let Some(signature) = signature {
+                *current_signature = Some(signature);
+            }
             segment.push_str(text);
         } else {
-            self.segments
-                .push(MessageSegment::Thinking(text.to_string()));
+            self.segments.push(MessageSegment::Thinking {
+                text: text.to_string(),
+                signature,
+            });
         }
     }
 
@@ -122,11 +149,12 @@ impl Message {
         for segment in &self.segments {
             match segment {
                 MessageSegment::Text(text) => result.push_str(text),
-                MessageSegment::Thinking(text) => {
-                    result.push_str("<think>");
+                MessageSegment::Thinking { text, .. } => {
+                    result.push_str("<think>\n");
                     result.push_str(text);
-                    result.push_str("</think>");
+                    result.push_str("\n</think>");
                 }
+                MessageSegment::RedactedThinking(_) => {}
             }
         }
 
@@ -137,24 +165,22 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageSegment {
     Text(String),
-    Thinking(String),
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
+    RedactedThinking(Vec<u8>),
 }
 
 impl MessageSegment {
-    pub fn text_mut(&mut self) -> &mut String {
-        match self {
-            Self::Text(text) => text,
-            Self::Thinking(text) => text,
-        }
-    }
-
     pub fn should_display(&self) -> bool {
         // We add USING_TOOL_MARKER when making a request that includes tool uses
         // without non-whitespace text around them, and this can cause the model
         // to mimic the pattern, so we consider those segments not displayable.
         match self {
             Self::Text(text) => text.is_empty() || text.trim() == USING_TOOL_MARKER,
-            Self::Thinking(text) => text.is_empty() || text.trim() == USING_TOOL_MARKER,
+            Self::Thinking { text, .. } => text.is_empty() || text.trim() == USING_TOOL_MARKER,
+            Self::RedactedThinking(_) => false,
         }
     }
 }
@@ -274,6 +300,7 @@ pub struct Thread {
     detailed_summary_state: DetailedSummaryState,
     messages: Vec<Message>,
     next_message_id: MessageId,
+    last_prompt_id: PromptId,
     context: BTreeMap<ContextId, AssistantContext>,
     context_by_message: HashMap<MessageId, Vec<ContextId>>,
     project_context: SharedProjectContext,
@@ -294,6 +321,9 @@ pub struct Thread {
     feedback: Option<ThreadFeedback>,
     message_feedback: HashMap<MessageId, ThreadFeedback>,
     last_auto_capture_at: Option<Instant>,
+    request_callback: Option<
+        Box<dyn FnMut(&LanguageModelRequest, &[Result<LanguageModelCompletionEvent, String>])>,
+    >,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +350,7 @@ impl Thread {
             detailed_summary_state: DetailedSummaryState::NotGenerated,
             messages: Vec::new(),
             next_message_id: MessageId(0),
+            last_prompt_id: PromptId::new(),
             context: BTreeMap::default(),
             context_by_message: HashMap::default(),
             project_context: system_prompt,
@@ -345,6 +376,7 @@ impl Thread {
             feedback: None,
             message_feedback: HashMap::default(),
             last_auto_capture_at: None,
+            request_callback: None,
         }
     }
 
@@ -384,8 +416,11 @@ impl Thread {
                         .into_iter()
                         .map(|segment| match segment {
                             SerializedMessageSegment::Text { text } => MessageSegment::Text(text),
-                            SerializedMessageSegment::Thinking { text } => {
-                                MessageSegment::Thinking(text)
+                            SerializedMessageSegment::Thinking { text, signature } => {
+                                MessageSegment::Thinking { text, signature }
+                            }
+                            SerializedMessageSegment::RedactedThinking { data } => {
+                                MessageSegment::RedactedThinking(data)
                             }
                         })
                         .collect(),
@@ -393,6 +428,7 @@ impl Thread {
                 })
                 .collect(),
             next_message_id,
+            last_prompt_id: PromptId::new(),
             context: BTreeMap::default(),
             context_by_message: HashMap::default(),
             project_context,
@@ -413,7 +449,16 @@ impl Thread {
             feedback: None,
             message_feedback: HashMap::default(),
             last_auto_capture_at: None,
+            request_callback: None,
         }
+    }
+
+    pub fn set_request_callback(
+        &mut self,
+        callback: impl 'static
+        + FnMut(&LanguageModelRequest, &[Result<LanguageModelCompletionEvent, String>]),
+    ) {
+        self.request_callback = Some(Box::new(callback));
     }
 
     pub fn id(&self) -> &ThreadId {
@@ -430,6 +475,10 @@ impl Thread {
 
     pub fn touch_updated_at(&mut self) {
         self.updated_at = Utc::now();
+    }
+
+    pub fn advance_prompt_id(&mut self) {
+        self.last_prompt_id = PromptId::new();
     }
 
     pub fn summary(&self) -> Option<SharedString> {
@@ -824,9 +873,10 @@ impl Thread {
             for segment in &message.segments {
                 match segment {
                     MessageSegment::Text(content) => text.push_str(content),
-                    MessageSegment::Thinking(content) => {
+                    MessageSegment::Thinking { text: content, .. } => {
                         text.push_str(&format!("<think>{}</think>", content))
                     }
+                    MessageSegment::RedactedThinking(_) => {}
                 }
             }
             text.push('\n');
@@ -856,8 +906,16 @@ impl Thread {
                                 MessageSegment::Text(text) => {
                                     SerializedMessageSegment::Text { text: text.clone() }
                                 }
-                                MessageSegment::Thinking(text) => {
-                                    SerializedMessageSegment::Thinking { text: text.clone() }
+                                MessageSegment::Thinking { text, signature } => {
+                                    SerializedMessageSegment::Thinking {
+                                        text: text.clone(),
+                                        signature: signature.clone(),
+                                    }
+                                }
+                                MessageSegment::RedactedThinking(data) => {
+                                    SerializedMessageSegment::RedactedThinking {
+                                        data: data.clone(),
+                                    }
                                 }
                             })
                             .collect(),
@@ -942,6 +1000,8 @@ impl Thread {
         cx: &mut Context<Self>,
     ) -> LanguageModelRequest {
         let mut request = LanguageModelRequest {
+            thread_id: Some(self.id.to_string()),
+            prompt_id: Some(self.last_prompt_id.to_string()),
             messages: vec![],
             tools: Vec::new(),
             stop: Vec::new(),
@@ -998,10 +1058,35 @@ impl Thread {
                 }
             }
 
-            if !message.segments.is_empty() {
+            if !message.context.is_empty() {
                 request_message
                     .content
-                    .push(MessageContent::Text(message.to_string()));
+                    .push(MessageContent::Text(message.context.to_string()));
+            }
+
+            for segment in &message.segments {
+                match segment {
+                    MessageSegment::Text(text) => {
+                        if !text.is_empty() {
+                            request_message
+                                .content
+                                .push(MessageContent::Text(text.into()));
+                        }
+                    }
+                    MessageSegment::Thinking { text, signature } => {
+                        if !text.is_empty() {
+                            request_message.content.push(MessageContent::Thinking {
+                                text: text.into(),
+                                signature: signature.clone(),
+                            });
+                        }
+                    }
+                    MessageSegment::RedactedThinking(data) => {
+                        request_message
+                            .content
+                            .push(MessageContent::RedactedThinking(data.clone()));
+                    }
+                };
             }
 
             match request_kind {
@@ -1056,15 +1141,6 @@ impl Thread {
             content.push(stale_message.into());
         }
 
-        if action_log.has_edited_files_since_project_diagnostics_check() {
-            content.push(
-                "\n\nWhen you're done making changes, make sure to check project diagnostics \
-                and fix all errors AND warnings you introduced! \
-                DO NOT mention you're going to do this until you're done."
-                    .into(),
-            );
-        }
-
         if !content.is_empty() {
             let context_message = LanguageModelRequestMessage {
                 role: Role::User,
@@ -1083,12 +1159,19 @@ impl Thread {
         cx: &mut Context<Self>,
     ) {
         let pending_completion_id = post_inc(&mut self.completion_count);
+        let mut request_callback_parameters = if self.request_callback.is_some() {
+            Some((request.clone(), Vec::new()))
+        } else {
+            None
+        };
+        let prompt_id = self.last_prompt_id.clone();
         let task = cx.spawn(async move |thread, cx| {
             let stream_completion_future = model.stream_completion_with_usage(request, &cx);
             let initial_token_usage =
                 thread.read_with(cx, |thread, _cx| thread.cumulative_token_usage);
             let stream_completion = async {
                 let (mut events, usage) = stream_completion_future.await?;
+
                 let mut stop_reason = StopReason::EndTurn;
                 let mut current_token_usage = TokenUsage::default();
 
@@ -1101,6 +1184,11 @@ impl Thread {
                 }
 
                 while let Some(event) = events.next().await {
+                    if let Some((_, response_events)) = request_callback_parameters.as_mut() {
+                        response_events
+                            .push(event.as_ref().map_err(|error| error.to_string()).cloned());
+                    }
+
                     let event = event?;
 
                     thread.update(cx, |thread, cx| {
@@ -1144,10 +1232,13 @@ impl Thread {
                                     };
                                 }
                             }
-                            LanguageModelCompletionEvent::Thinking(chunk) => {
+                            LanguageModelCompletionEvent::Thinking {
+                                text: chunk,
+                                signature,
+                            } => {
                                 if let Some(last_message) = thread.messages.last_mut() {
                                     if last_message.role == Role::Assistant {
-                                        last_message.push_thinking(&chunk);
+                                        last_message.push_thinking(&chunk, signature);
                                         cx.emit(ThreadEvent::StreamedAssistantThinking(
                                             last_message.id,
                                             chunk,
@@ -1160,7 +1251,10 @@ impl Thread {
                                         // will result in duplicating the text of the chunk in the rendered Markdown.
                                         thread.insert_message(
                                             Role::Assistant,
-                                            vec![MessageSegment::Thinking(chunk.to_string())],
+                                            vec![MessageSegment::Thinking {
+                                                text: chunk.to_string(),
+                                                signature,
+                                            }],
                                             cx,
                                         );
                                     };
@@ -1265,6 +1359,14 @@ impl Thread {
                     }
                     cx.emit(ThreadEvent::Stopped(result.map_err(Arc::new)));
 
+                    if let Some((request_callback, (request, response_events))) = thread
+                        .request_callback
+                        .as_mut()
+                        .zip(request_callback_parameters.as_ref())
+                    {
+                        request_callback(request, response_events);
+                    }
+
                     thread.auto_capture_telemetry(cx);
 
                     if let Ok(initial_usage) = initial_token_usage {
@@ -1273,6 +1375,7 @@ impl Thread {
                         telemetry::event!(
                             "Assistant Thread Completion",
                             thread_id = thread.id().to_string(),
+                            prompt_id = prompt_id,
                             model = model.telemetry_id(),
                             model_provider = model.provider_id().to_string(),
                             input_tokens = usage.input_tokens,
@@ -1558,17 +1661,12 @@ impl Thread {
         });
     }
 
+    /// Insert an empty message to be populated with tool results upon send.
     pub fn attach_tool_results(&mut self, cx: &mut Context<Self>) {
-        // Insert a user message to contain the tool results.
-        self.insert_user_message(
-            // TODO: Sending up a user message without any content results in the model sending back
-            // responses that also don't have any content. We currently don't handle this case well,
-            // so for now we provide some text to keep the model on track.
-            "Here are the tool results.",
-            Vec::new(),
-            None,
-            cx,
-        );
+        // Tool results are assumed to be waiting on the next message id, so they will populate
+        // this empty message before sending to model. Would prefer this to be more straightforward.
+        self.insert_message(Role::User, vec![], cx);
+        self.auto_capture_telemetry(cx);
     }
 
     /// Cancels the last pending completion, if there are any pending.
@@ -1847,9 +1945,10 @@ impl Thread {
             for segment in &message.segments {
                 match segment {
                     MessageSegment::Text(text) => writeln!(markdown, "{}\n", text)?,
-                    MessageSegment::Thinking(text) => {
-                        writeln!(markdown, "<think>{}</think>\n", text)?
+                    MessageSegment::Thinking { text, .. } => {
+                        writeln!(markdown, "<think>\n{}\n</think>\n", text)?
                     }
+                    MessageSegment::RedactedThinking(_) => {}
                 }
             }
 

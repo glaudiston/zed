@@ -15,6 +15,7 @@ use std::{
 };
 use text::LineEnding;
 use util::{ResultExt, get_system_shell};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectContext {
@@ -51,6 +52,7 @@ impl ProjectContext {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DefaultUserRulesContext {
+    pub uuid: Uuid,
     pub title: Option<String>,
     pub contents: String,
 }
@@ -58,7 +60,6 @@ pub struct DefaultUserRulesContext {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeContext {
     pub root_name: String,
-    pub abs_path: Arc<Path>,
     pub rules_file: Option<RulesFileContext>,
 }
 
@@ -401,7 +402,6 @@ mod test {
     fn test_assistant_system_prompt_renders() {
         let worktrees = vec![WorktreeContext {
             root_name: "path".into(),
-            abs_path: Path::new("/some/path").into(),
             rules_file: Some(RulesFileContext {
                 path_in_worktree: Path::new(".rules").into(),
                 abs_path: Path::new("/some/path/.rules").into(),
@@ -409,6 +409,7 @@ mod test {
             }),
         }];
         let default_user_rules = vec![DefaultUserRulesContext {
+            uuid: Uuid::nil(),
             title: Some("Rules title".into()),
             contents: "Rules contents".into(),
         }];

@@ -74,7 +74,7 @@ pub struct RunningState {
     console: Entity<Console>,
     breakpoint_list: Entity<BreakpointList>,
     panes: PaneGroup,
-    active_pane: Option<Entity<Pane>>,
+    active_pane: Entity<Pane>,
     pane_close_subscriptions: HashMap<EntityId, Subscription>,
     dock_axis: Axis,
     _schedule_serialize: Option<Task<()>>,
@@ -85,8 +85,8 @@ impl RunningState {
         self.thread_id
     }
 
-    pub(crate) fn active_pane(&self) -> Option<&Entity<Pane>> {
-        self.active_pane.as_ref()
+    pub(crate) fn active_pane(&self) -> &Entity<Pane> {
+        &self.active_pane
     }
 }
 
@@ -703,6 +703,7 @@ impl RunningState {
 
             workspace::PaneGroup::with_root(root)
         };
+        let active_pane = panes.first_pane();
 
         Self {
             session,
@@ -715,7 +716,7 @@ impl RunningState {
             stack_frame_list,
             session_id,
             panes,
-            active_pane: None,
+            active_pane,
             module_list,
             console,
             breakpoint_list,
@@ -927,6 +928,7 @@ impl RunningState {
                     .ok_or_else(|| anyhow!("{}: is not a valid adapter name", &adapter))
                     .map(|adapter| adapter.config_from_zed_format(zed_config))??;
                 config = scenario.config;
+                Self::substitute_variables_in_config(&mut config, &task_context);
             } else {
                 anyhow::bail!("No request or build provided");
             };
@@ -1229,7 +1231,7 @@ impl RunningState {
                 cx.notify();
             }
             Event::Focus => {
-                this.active_pane = Some(source_pane.clone());
+                this.active_pane = source_pane.clone();
             }
             Event::ZoomIn => {
                 source_pane.update(cx, |pane, cx| {
@@ -1253,10 +1255,10 @@ impl RunningState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active_pane = self.active_pane.clone();
         if let Some(pane) = self
-            .active_pane
-            .as_ref()
-            .and_then(|pane| self.panes.find_pane_in_direction(pane, direction, cx))
+            .panes
+            .find_pane_in_direction(&active_pane, direction, cx)
         {
             pane.update(cx, |pane, cx| {
                 pane.focus_active_item(window, cx);

@@ -34,7 +34,6 @@ pub enum AnthropicModelMode {
 pub enum Model {
     #[serde(rename = "claude-3-5-sonnet", alias = "claude-3-5-sonnet-latest")]
     Claude3_5Sonnet,
-    #[default]
     #[serde(rename = "claude-3-7-sonnet", alias = "claude-3-7-sonnet-latest")]
     Claude3_7Sonnet,
     #[serde(
@@ -49,6 +48,7 @@ pub enum Model {
         alias = "claude-opus-4-thinking-latest"
     )]
     ClaudeOpus4Thinking,
+    #[default]
     #[serde(rename = "claude-sonnet-4", alias = "claude-sonnet-4-latest")]
     ClaudeSonnet4,
     #[serde(
@@ -150,10 +150,10 @@ impl Model {
 
     pub fn display_name(&self) -> &str {
         match self {
-            Model::ClaudeOpus4 => "Claude 4 Opus",
-            Model::ClaudeOpus4Thinking => "Claude 4 Opus Thinking",
-            Model::ClaudeSonnet4 => "Claude 4 Sonnet",
-            Model::ClaudeSonnet4Thinking => "Claude 4 Sonnet Thinking",
+            Model::ClaudeOpus4 => "Claude Opus 4",
+            Model::ClaudeOpus4Thinking => "Claude Opus 4 Thinking",
+            Model::ClaudeSonnet4 => "Claude Sonnet 4",
+            Model::ClaudeSonnet4Thinking => "Claude Sonnet 4 Thinking",
             Self::Claude3_7Sonnet => "Claude 3.7 Sonnet",
             Self::Claude3_5Sonnet => "Claude 3.5 Sonnet",
             Self::Claude3_7SonnetThinking => "Claude 3.7 Sonnet Thinking",

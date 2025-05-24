@@ -95,6 +95,22 @@ pub struct ContextServerConfiguration {
     /// Consult the documentation for the context server to see what settings
     /// are supported.
     pub settings: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zed_tool_confirmation: Option<ZedToolConfirmationSettings>,
+}
+
+// Helper function for serde default
+fn default_true_option() -> Option<bool> {
+    Some(true)
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[schemars(deny_unknown_fields)]
+pub struct ZedToolConfirmationSettings {
+    #[serde(default = "default_true_option")]
+    pub default_needs_confirmation: Option<bool>,
+    #[serde(default)]
+    pub tools: std::collections::HashMap<String, bool>, // Tool name -> needs_confirmation
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

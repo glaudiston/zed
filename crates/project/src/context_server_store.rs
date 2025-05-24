@@ -354,6 +354,15 @@ impl ContextServerStore {
         self.context_server_factory.as_ref().is_some() || configuration.command.is_some()
     }
 
+    pub fn get_confirmation_settings(
+        &self,
+        server_id: &ContextServerId,
+    ) -> Option<crate::project_settings::ZedToolConfirmationSettings> {
+        self.servers
+            .get(server_id)
+            .and_then(|state| state.configuration().zed_tool_confirmation.clone())
+    }
+
     fn create_context_server(
         &self,
         id: ContextServerId,

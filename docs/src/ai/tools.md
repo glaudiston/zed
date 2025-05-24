@@ -1,6 +1,10 @@
 # Tools
 
-Zed's Agent has access to a variety of tools that allow it to interact with your codebase and perform tasks.
+Zed's Agent has access to a variety of tools that allow it to interact with your codebase and perform tasks. These tools can be built-in or provided by external Model Context Protocol (MCP) servers.
+
+Tools provided by external Model Context Protocol (MCP) servers can now return image content in addition to text. When an MCP tool returns an image, the Zed agent will describe this image textually (e.g., 'Tool returned an image of type image/jpeg') when presenting the tool's result back to the language model. For details on configuring MCP servers, see the [MCP documentation](mcp.md).
+
+Confirmation requirements for tools provided by MCP servers are also configurable. See the [MCP documentation](mcp.md) for how to set server-wide defaults or per-tool confirmation settings.
 
 ## Read & Search Tools
 

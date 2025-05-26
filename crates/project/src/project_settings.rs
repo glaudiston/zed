@@ -452,6 +452,7 @@ impl Settings for ProjectSettings {
                                     .into(),
                             ),
                             settings: None,
+                        zed_tool_confirmation: None, // Ensure explicit initialization
                         },
                     ))
                 }));

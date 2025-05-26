@@ -88,6 +88,7 @@ impl AddContextServerModal {
                                 env: None,
                             }),
                             settings: Some(json!({})),
+                            zed_tool_confirmation: None,
                         },
                     );
                 });

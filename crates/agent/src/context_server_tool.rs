@@ -2,10 +2,17 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use assistant_settings::AssistantSettings;
-use assistant_tool::{ActionLog, Tool, ToolResult, ToolResultOutput, ToolSource};
+use assistant_tool::{
+    ActionLog, Tool, ToolResult, ToolResultContent as AssistantToolResultContent,
+    ToolResultOutput, ToolSource,
+};
+use settings::Settings;
 use context_server::{ContextServerId, types};
-use gpui::{AnyWindowHandle, App, Entity, Task};
-use language_model::{LanguageModel, LanguageModelImage, LanguageModelRequest, LanguageModelToolSchemaFormat, LanguageModelToolResultContent};
+use gpui::{AnyWindowHandle, App, Entity, Size, Task};
+use language_model::{
+    LanguageModel, LanguageModelImage, LanguageModelRequest,
+    LanguageModelToolResultContent as LmToolResultContent, LanguageModelToolSchemaFormat,
+};
 use project::{Project, context_server_store::ContextServerStore};
 use ui::IconName;
 
@@ -427,14 +434,18 @@ impl Tool for ContextServerTool {
                             text_parts.push(text);
                         }
                         types::ToolResponseContent::Image { data, mime_type } => {
-                            if captured_image.is_none() {
-                                captured_image = Some(LanguageModelImage {
-                                    source: data.into(), // data is already base64 string
-                                    media_type: Some(mime_type),
-                                    url: None,
-                                });
+                            if mime_type == "image/png" {
+                                if captured_image.is_none() {
+                                    captured_image = Some(LanguageModelImage {
+                                        source: data.into(),
+                                        size: Size::default(),
+                                    });
+                                } else {
+                                    log::warn!("Multiple images in tool response, only processing the first one.");
+                                }
                             } else {
-                                log::warn!("Multiple images in tool response, only processing the first one.");
+                                log::warn!("MCP tool returned non-PNG image ({}). Representing as text.", mime_type);
+                                text_parts.push(format!("Tool returned an image of type {} (content not displayed in this view)", mime_type));
                             }
                         }
                         types::ToolResponseContent::Resource { .. } => {
@@ -443,13 +454,25 @@ impl Tool for ContextServerTool {
                     }
                 }
 
-                let final_content = if let Some(image) = captured_image {
-                    LanguageModelToolResultContent::Image(image)
+                let intermediate_lm_content = if let Some(image) = captured_image {
+                    LmToolResultContent::Image(image)
                 } else {
-                    LanguageModelToolResultContent::Text(text_parts.join("\n").into())
+                    LmToolResultContent::Text(text_parts.join("\n").into())
                 };
 
-                Ok(ToolResultOutput { content: final_content, output: None })
+                let final_assistant_tool_content = match intermediate_lm_content {
+                    LmToolResultContent::Text(s) => {
+                        AssistantToolResultContent::Text(s.to_string())
+                    }
+                    LmToolResultContent::Image(img) => {
+                        AssistantToolResultContent::Image(img)
+                    }
+                    LmToolResultContent::WrappedText(wt) => {
+                        AssistantToolResultContent::Text(wt.text.to_string())
+                    }
+                };
+
+                Ok(ToolResultOutput { content: final_assistant_tool_content, output: None })
             })
             .into()
         } else {
